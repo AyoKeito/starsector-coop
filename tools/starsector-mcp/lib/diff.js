@@ -15,9 +15,289 @@
  * guest, and the engine's fleet ids are assigned locally on each client. `lines` is the visibility
  * probe's text dump, where the two sides describe the same fact in different sentences; its
  * structured `view` counterpart is what actually compares. Diffing any of the three reports a
- * difference on every run and buries the ones that mean something.
+ * difference on every run and buries the ones that mean something. Native orbit-focus and dialog
+ * target ids are metadata too; their canonical reference fields remain part of the comparison.
  */
-export const DEFAULT_IGNORE_KEYS = ['role', 'engineId', 'lines'];
+export const DEFAULT_IGNORE_KEYS = ['role', 'engineId', 'orbitFocusEngineId', 'interactionTargetEngineId', 'lines'];
+
+/** Native labels/catalog numbers do not determine temporary encounter gameplay or identity. */
+export const ENCOUNTER_COSMETIC_KEYS = [
+  'name', 'shipName', 'firstName', 'lastName', 'displayName', 'variantDisplayName', 'catalogId'
+];
+
+/** Local ids and the engine's LocationToken cache defect are diagnostic metadata. */
+export const ENCOUNTER_NATIVE_DIAGNOSTIC_KEYS = ['engineId', 'nativeSectorResolves', 'nativeSectorLookupError'];
+
+const STORM_CELL_STATES = new Set(['ABSENT', 'OFF', 'WAIT', 'SIGNAL', 'STORM', 'STORM_WANE']);
+const STORM_CELL_NUMBERS = ['wait', 'signal', 'wane', 'maxSignal', 'maxWane', 'timeScale'];
+const STORM_MAX_INDEX = 2147483647;
+
+/** Compare the same global cells at the same raw clock and authoritative frame anchor. */
+export function diffStorms(host, guest, options = {}) {
+  if (options.tolerance !== undefined && options.tolerance !== 0) {
+    throw new Error('storms requires exact comparison; tolerance must be 0');
+  }
+  if (options.ignore !== undefined && (!Array.isArray(options.ignore) || options.ignore.length !== 0)) {
+    throw new Error('storms gameplay fields cannot be ignored');
+  }
+  const maxDifferences = options.maxDifferences ?? 100;
+  if (!Number.isInteger(maxDifferences) || maxDifferences < 1 || maxDifferences > 1000) {
+    throw new Error('maxDifferences must be an integer from 1 to 1000');
+  }
+  const hostCells = validateManifest(host, 'host');
+  const guestCells = validateManifest(guest, 'guest');
+  const availability = { host: host.available, guest: guest.available };
+  if (!host.available || !guest.available) {
+    return { equal: false, status: 'INCONCLUSIVE', availability,
+      reason: 'storms diagnostics unavailable; a missing legacy/native storm world is not an empty grid',
+      unavailable: { host: host.available ? null : host, guest: guest.available ? null : guest },
+      differences: [], ignored: [], counts: { host: 0, guest: 0, differing: 0 }, maxDifferences, truncated: false };
+  }
+  const common = [...hostCells.keys()].filter((key) => guestCells.has(key)).sort(compareStormCellKeys);
+  const hostOnly = [...hostCells.keys()].filter((key) => !guestCells.has(key)).sort(compareStormCellKeys);
+  const guestOnly = [...guestCells.keys()].filter((key) => !hostCells.has(key)).sort(compareStormCellKeys);
+  const requested = options.requestedCells ?? [];
+  if (!Array.isArray(requested) || requested.some((key) => typeof key !== 'string' || !/^\d+,\d+$/.test(key))) {
+    throw new Error('storms requestedCells must contain global i,j keys');
+  }
+  const missingRequested = { host: requested.filter((key) => !hostCells.has(key)),
+    guest: requested.filter((key) => !guestCells.has(key)) };
+  const project = (table, cells) => ({
+    width: table.width, height: table.height, gridHash: table.gridHash,
+    generation: table.generation, commitTimestamp: table.commitTimestamp,
+    cells: Object.fromEntries(common.map((key) => [key, cells.get(key)]))
+  });
+  const result = diffJson(project(host, hostCells), project(guest, guestCells), { tolerance: 0, ignore: [] });
+  const calendarMatched = host.timestamp === guest.timestamp;
+  const snapshotMatched = host.snapshotTimestamp === guest.snapshotTimestamp && host.revision === guest.revision;
+  const reasons = [];
+  if (!calendarMatched) reasons.push('storms require matching raw campaign timestamps; hold the shared pause and sample again');
+  if (!snapshotMatched) reasons.push('storms authoritative snapshot/revision lag differs; wait for the same frame anchor and sample again');
+  if (host.snapshotTimestamp > host.timestamp || guest.snapshotTimestamp > guest.timestamp) {
+    reasons.push('a storm snapshot is ahead of its local campaign clock');
+  }
+  if (host.pendingControlCount || guest.pendingControlCount) reasons.push('storm controls are still pending');
+  if (!common.length) reasons.push('no common global storm cells were sampled; specify the same i,j selectors');
+  if (missingRequested.host.length || missingRequested.guest.length) reasons.push('an explicit global storm cell was not returned');
+  const status = reasons.length ? 'INCONCLUSIVE' : result.equal ? 'PASS' : 'FAIL';
+  return {
+    ...result, equal: status === 'PASS', status, availability, calendarMatched, snapshotMatched,
+    campaignTimestamps: { host: host.timestamp, guest: guest.timestamp },
+    snapshots: { host: snapshotMetadata(host), guest: snapshotMetadata(guest) },
+    sampleCoverage: { commonGlobalCells: common, hostOnlyGlobalCells: hostOnly, guestOnlyGlobalCells: guestOnly,
+      missingRequestedGlobalCells: missingRequested },
+    comparedCellCount: common.length,
+    ...(reasons.length ? { reason: reasons.join('; '), reasons } : {}),
+    differences: result.differences.slice(0, maxDifferences),
+    truncated: result.differences.length > maxDifferences, maxDifferences
+  };
+}
+
+function snapshotMetadata(table) {
+  return { revision: table.revision, generation: table.generation, commitTimestamp: table.commitTimestamp,
+    snapshotTimestamp: table.snapshotTimestamp, localLagMillis: table.timestamp - table.snapshotTimestamp,
+    trackerCount: table.trackerCount, pendingControlCount: table.pendingControlCount };
+}
+
+function validateManifest(table, instance) {
+  if (!isPlainObject(table) || typeof table.available !== 'boolean' || table.role !== instance.toUpperCase()) {
+    throw new Error(`storms requires explicit availability and role ${instance.toUpperCase()} on ${instance}`);
+  }
+  if (!Number.isSafeInteger(table.pendingControlCount) || table.pendingControlCount < 0) {
+    throw new Error(`storms requires a nonnegative pendingControlCount on ${instance}`);
+  }
+  if (!table.available) return new Map();
+  for (const field of ['timestamp', 'commitTimestamp', 'snapshotTimestamp']) {
+    if (!Number.isSafeInteger(table[field])) throw new Error(`storms requires an exact safe-integer ${field} on ${instance}`);
+  }
+  for (const field of ['revision', 'generation', 'trackerCount']) {
+    if (!Number.isSafeInteger(table[field]) || table[field] < 0) {
+      throw new Error(`storms requires a nonnegative safe-integer ${field} on ${instance}`);
+    }
+  }
+  for (const field of ['width', 'height']) {
+    if (!Number.isInteger(table[field]) || table[field] < 1 || table[field] > STORM_MAX_INDEX) {
+      throw new Error(`storms requires a positive ${field} on ${instance}`);
+    }
+  }
+  if (!Number.isSafeInteger(table.width * table.height) || table.trackerCount > table.width * table.height
+      || typeof table.gridHash !== 'string' || !/^[0-9a-f]{64}$/.test(table.gridHash)) {
+    throw new Error(`storms has an invalid grid identity or trackerCount on ${instance}`);
+  }
+  if (!Array.isArray(table.cells) || table.cells.length > 128) {
+    throw new Error(`storms requires at most 128 global cell rows on ${instance}`);
+  }
+  const cells = new Map();
+  for (const row of table.cells) {
+    if (!isPlainObject(row) || !Number.isInteger(row.i) || !Number.isInteger(row.j)
+        || row.i < 0 || row.j < 0 || row.i >= table.width || row.j >= table.height) {
+      throw new Error(`storms cell coordinates must be global grid indices on ${instance}`);
+    }
+    const key = `${row.i},${row.j}`;
+    if (cells.has(key)) throw new Error(`storms has a duplicate global cell on ${instance}: ${key}`);
+    if (!Number.isInteger(row.gridValue) || row.gridValue < 0 || row.gridValue > 2
+        || !STORM_CELL_STATES.has(row.state) || !Number.isSafeInteger(row.epoch) || row.epoch < 0
+        || STORM_CELL_NUMBERS.some((field) => typeof row[field] !== 'number' || !Number.isFinite(row[field])
+          || Math.abs(row[field]) > 1_000_000)
+        || row.timeScale < 0 || row.timeScale > 100) {
+      throw new Error(`storms has an invalid native cell row on ${instance}: ${key}`);
+    }
+    if (row.state === 'ABSENT' && (row.epoch !== 0 || STORM_CELL_NUMBERS.some((field) => row[field] !== 0))) {
+      throw new Error(`storms ABSENT cell must have zero timers on ${instance}: ${key}`);
+    }
+    cells.set(key, Object.fromEntries(['i', 'j', 'gridValue', 'state', 'epoch', ...STORM_CELL_NUMBERS].map((field) => [field, row[field]])));
+  }
+  return cells;
+}
+
+function compareStormCellKeys(a, b) {
+  const [ai, aj] = a.split(',').map(Number); const [bi, bj] = b.split(',').map(Number);
+  return ai - bi || aj - bj;
+}
+
+const LIGHT_ID = /^light:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const LIGHT_NUMERIC_FIELDS = ['x', 'y', 'colorArgb', 'frequencyMultMin', 'frequencyMultMax',
+  'frequencyChangeMult', 'size', 'detectedRange', 'bonusMult', 'remainingDays', 'pointsOverride', 'radius'];
+
+/** Exact native light recipes and membership; local engine ids and actor state do not compare. */
+export function diffLights(host, guest, options = {}) {
+  validateLightManifest(host, 'host');
+  validateLightManifest(guest, 'guest');
+  if (options.tolerance !== undefined && Number(options.tolerance) !== 0) {
+    throw new Error('lights requires exact comparison; tolerance must be 0');
+  }
+  if (options.ignore !== undefined && (!Array.isArray(options.ignore)
+      || options.ignore.some((key) => key !== 'engineId'))) {
+    throw new Error('lights only excludes engineId; gameplay fields cannot be ignored');
+  }
+  const maxDifferences = options.maxDifferences ?? 100;
+  if (!Number.isInteger(maxDifferences) || maxDifferences < 1 || maxDifferences > 1000) {
+    throw new Error('maxDifferences must be an integer from 1 to 1000');
+  }
+  const result = diffJson({ lights: host.lights }, { lights: guest.lights }, {
+    tolerance: 0, ignore: ['engineId']
+  });
+  const calendarMatched = Number.isSafeInteger(host.campaignTimestamp)
+    && Number.isSafeInteger(guest.campaignTimestamp)
+    && host.campaignTimestamp === guest.campaignTimestamp;
+  const status = !calendarMatched ? 'INCONCLUSIVE' : result.equal ? 'PASS' : 'FAIL';
+  return {
+    ...result,
+    equal: status === 'PASS',
+    status,
+    calendarMatched,
+    campaignTimestamps: { host: host.campaignTimestamp, guest: guest.campaignTimestamp },
+    ...(calendarMatched ? {} : { reason: 'lights require matching safe-integer campaign timestamps; hold the shared pause and sample again' }),
+    differences: result.differences.slice(0, maxDifferences).map(compactDifference),
+    truncated: result.differences.length > maxDifferences,
+    resolutionFailureCount: 0,
+    maxDifferences
+  };
+}
+
+function validateLightManifest(table, instance) {
+  if (table?.truncated !== false || !isPlainObject(table.lights)) {
+    throw new Error(`lights requires a complete untruncated manifest on ${instance}`);
+  }
+  const entries = Object.entries(table.lights);
+  if (!Number.isInteger(table.count) || table.count !== entries.length
+      || !Number.isInteger(table.candidateCount) || table.candidateCount !== table.count) {
+    throw new Error(`lights manifest count or candidateCount is incomplete on ${instance}`);
+  }
+  const engineIds = new Set();
+  const hostEntityIds = new Set();
+  for (const [id, row] of entries) {
+    if (!LIGHT_ID.test(id) || !isPlainObject(row) || row.id !== id || row.managed !== true
+        || typeof row.engineId !== 'string' || !row.engineId || engineIds.has(row.engineId)) {
+      throw new Error(`lights manifest requires unique managed canonical identities on ${instance}: ${id}`);
+    }
+    engineIds.add(row.engineId);
+    if (typeof row.hostEntityId !== 'string' || !row.hostEntityId.trim()
+        || hostEntityIds.has(row.hostEntityId)) {
+      throw new Error(`lights manifest requires unique nonempty host entity identities on ${instance}: ${id}`);
+    }
+    hostEntityIds.add(row.hostEntityId);
+    for (const field of LIGHT_NUMERIC_FIELDS) {
+      if (typeof row[field] !== 'number' || !Number.isFinite(row[field])) {
+        throw new Error(`lights manifest requires finite ${field} on ${instance}: ${id}`);
+      }
+    }
+    if (!Number.isInteger(row.colorArgb) || row.colorArgb < -2147483648 || row.colorArgb > 2147483647
+        || !Number.isSafeInteger(row.pointsOverride) || typeof row.dweller !== 'boolean'
+        || typeof row.despawning !== 'boolean'
+        || !row.despawning && row.remainingDays < 0
+        || row.dweller && typeof row.salvageSeed !== 'string'
+        || !(row.salvageSeed === null || typeof row.salvageSeed === 'string'
+          && /^-?\d+$/.test(row.salvageSeed)
+          && BigInt(row.salvageSeed) >= -9223372036854775808n
+          && BigInt(row.salvageSeed) <= 9223372036854775807n)) {
+      throw new Error(`lights manifest has an invalid native recipe on ${instance}: ${id}`);
+    }
+  }
+}
+
+/** Compare complete canonical membership, including role and identity-resolution checks. */
+export function diffEncounters(host, guest, options = {}) {
+  for (const [instance, table] of [['host', host], ['guest', guest]]) {
+    if (table?.truncated !== false || !isPlainObject(table.encounters)) {
+      throw new Error(`encounters requires a complete untruncated manifest on ${instance}`);
+    }
+  }
+  const maxDifferences = options.maxDifferences ?? 100;
+  if (!Number.isInteger(maxDifferences) || maxDifferences < 1 || maxDifferences > 1000) {
+    throw new Error('maxDifferences must be an integer from 1 to 1000');
+  }
+  const result = diffJson({ encounters: host.encounters }, { encounters: guest.encounters }, {
+    ...options, ignore: [...new Set([...(options.ignore ?? ENCOUNTER_COSMETIC_KEYS), ...ENCOUNTER_NATIVE_DIAGNOSTIC_KEYS])]
+  });
+  const failedPaths = new Map();
+  for (const [instance, table] of [['host', host], ['guest', guest]]) {
+    for (const [instanceId, encounter] of Object.entries(table.encounters)) {
+      for (const collection of ['entities', 'untrackedEntities']) {
+        for (const [entityId, entity] of Object.entries(encounter[collection] ?? {})) {
+          if (entity.present !== true) continue;
+          for (const field of ['canonicalResolves', 'locationResolves']) {
+            if (entity[field] === true) continue;
+            const path = `$.encounters.${instanceId}.${collection}.${entityId}.${field}`;
+            if (!failedPaths.has(path)) failedPaths.set(path, { path, failedInstances: [],
+              host: host.encounters[instanceId]?.[collection]?.[entityId]?.[field],
+              guest: guest.encounters[instanceId]?.[collection]?.[entityId]?.[field],
+              note: 'present entity must resolve to the same object' });
+            failedPaths.get(path).failedInstances.push(instance);
+          }
+        }
+      }
+    }
+  }
+  let resolutionFailureCount = 0;
+  for (const failure of failedPaths.values()) {
+    resolutionFailureCount += failure.failedInstances.length;
+    const existing = result.differences.find((difference) => difference.path === failure.path);
+    if (existing) Object.assign(existing, { failedInstances: failure.failedInstances, note: failure.note });
+    else result.differences.push(failure);
+  }
+  return {
+    ...result,
+    equal: result.differences.length === 0,
+    counts: { ...result.counts, differing: result.differences.length },
+    differences: result.differences.slice(0, maxDifferences).map(compactDifference),
+    truncated: result.differences.length > maxDifferences,
+    resolutionFailureCount,
+    maxDifferences
+  };
+}
+
+// Missing whole systems still report their exact path, without copying a megabyte recipe twice.
+function compactDifference(difference) {
+  const result = { ...difference };
+  for (const side of ['host', 'guest']) {
+    const value = result[side];
+    if (Array.isArray(value)) result[side] = { kind: 'array', length: value.length };
+    else if (isPlainObject(value)) result[side] = { kind: 'object', keys: Object.keys(value).slice(0, 20), keyCount: Object.keys(value).length };
+    else if (typeof value === 'string' && value.length > 512) result[side] = { kind: 'string', length: value.length, preview: value.slice(0, 512) };
+  }
+  return result;
+}
 
 /** Field names tried, in order, when deciding whether an array is a keyed collection. */
 export const KEY_FIELDS = [

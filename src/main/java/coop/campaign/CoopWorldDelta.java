@@ -166,7 +166,9 @@ public record CoopWorldDelta(String entityId, Kind kind, boolean consumed,
          * the same faction later, so the value returns to one it already held and a set-based key
          * would freeze the guest on the first faction it ever heard about.
          */
-        COMMISSION;
+        COMMISSION,
+        /** Saved exploration flags of one recipe-bearing abyssal entity. Bidirectional. */
+        ENCOUNTER_STATE;
 
         /**
          * Whether the {@link Ledger} should dedup this kind by <em>payload</em> rather than by the
@@ -175,7 +177,7 @@ public record CoopWorldDelta(String entityId, Kind kind, boolean consumed,
          */
         public boolean latestWins() {
             return this == OBJECTIVE_OWNERSHIP || this == GATE_ACTIVATED || this == SURVEY
-                    || this == DECIV || this == COMMISSION;
+                    || this == DECIV || this == COMMISSION || this == ENCOUNTER_STATE;
         }
 
         /**

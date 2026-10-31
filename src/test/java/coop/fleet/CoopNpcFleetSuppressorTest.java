@@ -1,13 +1,21 @@
 package coop.fleet;
 
 import com.fs.starfarer.api.EveryFrameScript;
+import com.fs.starfarer.api.Global;
+import com.fs.starfarer.api.SettingsAPI;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
+import com.fs.starfarer.api.campaign.FactionAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
+import com.fs.starfarer.api.impl.campaign.ids.Factions;
+import coop.campaign.CoopSensorGhostManager;
+import coop.ambient.CoopLightBridge;
 import coop.fleet.CoopNpcFleetSuppressor.BaseIntelCleanup;
 import coop.fleet.CoopNpcFleetSuppressor.ManagerHandle;
 import coop.net.CoopConnectionRole;
+import coop.presence.CoopPresenceRegistry;
+import coop.testing.ApiProxies;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
@@ -64,6 +72,7 @@ class CoopNpcFleetSuppressorTest {
         assertTrue(CoopNpcFleetSuppressor.isSpawnerScriptName("MercFleetManagerV2"));
         assertTrue(CoopNpcFleetSuppressor.isSpawnerScriptName("RemnantSeededFleetManager"));
         assertTrue(CoopNpcFleetSuppressor.isSpawnerScriptName("PersonBountyManager"));
+        assertTrue(CoopNpcFleetSuppressor.isSpawnerScriptName("SlipstreamManager"));
         assertTrue(CoopNpcFleetSuppressor.isSpawnerScriptName("HegemonyPatrolFleetManager"));
     }
 
@@ -71,6 +80,7 @@ class CoopNpcFleetSuppressorTest {
     void doesNotMatchUnrelatedScripts() {
         assertFalse(CoopNpcFleetSuppressor.isSpawnerScriptName("CoopNetPump"));
         assertFalse(CoopNpcFleetSuppressor.isSpawnerScriptName("CoopCampaignReplicator"));
+        assertFalse(CoopNpcFleetSuppressor.isSpawnerScriptName("CoopSensorGhostManager"));
         assertFalse(CoopNpcFleetSuppressor.isSpawnerScriptName(""));
         assertFalse(CoopNpcFleetSuppressor.isSpawnerScriptName(null));
     }
@@ -110,14 +120,13 @@ class CoopNpcFleetSuppressorTest {
 
     /**
      * The other scripts {@code CoreLifecyclePluginImpl.addScriptsIfNeeded()} registers. These are
-     * per-player, benign, or deliberately deferred (slipstreams = Phase 26, bar/mission sync = its own
-     * phase) — suppressing them would take gameplay away from the guest for no determinism gain.
+     * per-player or benign. Seasonal slipstreams are host-owned under Phase 26 and their manager
+     * belongs to the suppression set; guest ability surges do not run through that manager.
      */
     @Test
-    void keepsBenignAndDeliberatelyDeferredScripts() {
+    void keepsBenignAndPerPlayerScripts() {
         for (String name : Arrays.asList(
                 "StrandedGiveTJScript",
-                "SlipstreamManager",
                 "OfficerManagerEvent",
                 "FieldRepairsScript",
                 "HTFactorTracker",
@@ -193,16 +202,101 @@ class CoopNpcFleetSuppressorTest {
         sector.scripts.add(new PirateBaseManager());
         sector.scripts.add(new SensorGhostManager());
         sector.scripts.add(new SlipstreamManager());
+        sector.scripts.add(new FieldRepairsScript());
         sector.memory.put("$ghostManager", "stale-handle");
 
         new CoopNpcFleetSuppressor().tick(sector.proxy(), 0L);
 
-        assertEquals(2, sector.removed.size(), "only the two spawners are removed");
+        assertEquals(3, sector.removed.size(), "the two spawners and slipstream manager are removed");
         assertEquals(1, sector.scripts.size());
-        assertEquals("SlipstreamManager", sector.scripts.get(0).getClass().getSimpleName());
+        assertEquals("FieldRepairsScript", sector.scripts.get(0).getClass().getSimpleName());
         assertFalse(sector.memory.containsKey("$ghostManager"), "stale ghost handle must be unset");
         assertSame(sector.removed.get(0), sector.memory.get("$core_pirateBaseManager"),
                 "the pirate base manager handle is backfilled, never cleared");
+    }
+
+    @Test
+    void lateNativeGhostManagersDoNotRemoveOrUncacheTheOwnedCosmeticReplacement() {
+        withGhostReplacement((sector, api, replacement) -> {
+            CoopNpcFleetSuppressor suppressor = new CoopNpcFleetSuppressor();
+            sector.scripts.add(new SensorGhostManager());
+            sector.transientScripts.add(new SensorGhostManager());
+
+            suppressor.tick(api, 0L);
+
+            assertEquals(2, sector.removed.size());
+            assertTrue(sector.scripts.isEmpty());
+            assertEquals(List.of(replacement), sector.transientScripts);
+            assertSame(replacement, sector.memory.get("$ghostManager"));
+            assertTrue(CoopSensorGhostManager.ownsCachedHandle(api));
+
+            // Reconnect/load re-arms the same native suppression pass, without replacing M5 state.
+            sector.scripts.add(new SensorGhostManager());
+            suppressor.reset();
+            suppressor.tick(api, 1L);
+            assertEquals(3, sector.removed.size());
+            assertEquals(List.of(replacement), sector.transientScripts);
+            assertSame(replacement, sector.memory.get("$ghostManager"));
+        });
+    }
+
+    @Test
+    void anUnregisteredCosmeticManagerCannotKeepItsStaleNativeCache() {
+        withGhostReplacement((sector, api, replacement) -> {
+            sector.transientScripts.remove(replacement);
+            sector.scripts.add(new SensorGhostManager());
+
+            new CoopNpcFleetSuppressor().tick(api, 0L);
+
+            assertFalse(sector.memory.containsKey("$ghostManager"));
+            assertFalse(CoopSensorGhostManager.ownsCachedHandle(api));
+        });
+    }
+
+    @Test
+    void aReplacementFromAnotherSectorCannotPreserveThatSectorsGhostHandle() {
+        withGhostReplacement((oldSector, oldApi, replacement) -> {
+            RecordingSector loaded = new RecordingSector();
+            SectorAPI current = loaded.proxy();
+            loaded.scripts.add(new SensorGhostManager());
+            loaded.transientScripts.add(replacement);
+            loaded.memory.put("$ghostManager", replacement);
+            Global.setSector(current);
+
+            new CoopNpcFleetSuppressor().tick(current, 0L);
+
+            assertFalse(loaded.memory.containsKey("$ghostManager"));
+            assertFalse(CoopSensorGhostManager.ownsCachedHandle(current));
+        });
+    }
+
+    @Test
+    void slipstreamManagerIsRemovedFromBothScriptListsAndRearmedAfterLoad() {
+        CoopNpcFleetSuppressor suppressor = new CoopNpcFleetSuppressor();
+        RecordingSector sector = new RecordingSector();
+        sector.scripts.add(new SlipstreamManager());
+        sector.transientScripts.add(new SlipstreamManager());
+        sector.scripts.add(new FieldRepairsScript());
+
+        suppressor.tick(sector.proxy(), 0L);
+
+        assertEquals(2, sector.removed.size());
+        assertEquals(1, sector.scripts.size());
+        assertTrue(sector.transientScripts.isEmpty());
+        assertNull(CoopNpcFleetSuppressor.managerHandle("SlipstreamManager"),
+                "vanilla never caches a sector-memory handle for the slipstream manager");
+        assertTrue(sector.memory.isEmpty());
+        assertTrue(suppressor.spawnersSuppressed());
+
+        // Vanilla adds a new manager on load; the new session must remove that instance as well.
+        sector.scripts.add(new SlipstreamManager());
+        suppressor.reset();
+        assertFalse(suppressor.spawnersSuppressed());
+        suppressor.tick(sector.proxy(), 1L);
+
+        assertEquals(3, sector.removed.size());
+        assertEquals(1, sector.scripts.size());
+        assertEquals("FieldRepairsScript", sector.scripts.get(0).getClass().getSimpleName());
     }
 
     // ---- Phase 12b/13: spawner suppression retries and re-arms ---------------------------------
@@ -341,7 +435,7 @@ class CoopNpcFleetSuppressorTest {
     void suppressionRemovesTheHostileActivityManagerScript() {
         RecordingSector sector = new RecordingSector();
         sector.scripts.add(new HostileActivityManager());
-        sector.scripts.add(new SlipstreamManager());
+        sector.scripts.add(new FieldRepairsScript());
 
         new CoopNpcFleetSuppressor().tick(sector.proxy(), 0L);
 
@@ -460,12 +554,45 @@ class CoopNpcFleetSuppressorTest {
     }
 
     @Test
+    void nativeLightEncounterFleetSurvivesTheActualGuestSweepWithoutBecomingAnNpcMirror() {
+        SweepSector sector = new SweepSector();
+        FakeSweptFleet dweller = new FakeSweptFleet(Map.of(CoopLightBridge.ENCOUNTER_FLEET_KEY,
+                "light:01234567-89ab-4def-8123-0123456789ab"), Factions.DWELLER);
+        sector.corvus.fleets.add(dweller);
+
+        new CoopNpcFleetSuppressor().tick(sector.proxy(), 1_000L);
+
+        assertEquals(1, sector.corvus.removed.size(), "the ordinary local NPC is still removed");
+        assertEquals(List.of(dweller), sector.corvus.fleets);
+        assertFalse(dweller.memory.containsKey(CoopNpcFleetSuppressor.NPC_MIRROR_TAG));
+    }
+
+    @Test
+    void malformedOrUnrelatedLightFleetMarkersDoNotBypassTheGuestSweep() {
+        SweepSector sector = new SweepSector();
+        sector.corvus.fleets.clear();
+        sector.corvus.fleets.add(new FakeSweptFleet(Map.of(CoopLightBridge.ENCOUNTER_FLEET_KEY,
+                "light:01234567-89ab-4def-8123-0123456789ab"), Factions.PIRATES));
+        sector.corvus.fleets.add(new FakeSweptFleet(Map.of(CoopLightBridge.ENCOUNTER_FLEET_KEY,
+                "not-a-light-id"), Factions.DWELLER));
+        sector.corvus.fleets.add(new FakeSweptFleet(Map.of(CoopLightBridge.ENCOUNTER_FLEET_KEY,
+                Boolean.TRUE), Factions.DWELLER));
+
+        new CoopNpcFleetSuppressor().tick(sector.proxy(), 1_000L);
+
+        assertEquals(3, sector.corvus.removed.size());
+        assertTrue(sector.corvus.fleets.isEmpty());
+    }
+
+    @Test
     void coverageLineReportsBothStatuses() {
         assertTrue(CoopNpcFleetSuppressor.coverageLine("persistent", "PirateBaseManager", true)
                 .contains("SUPPRESSED"));
-        assertTrue(CoopNpcFleetSuppressor.coverageLine("transient", "SlipstreamManager", false)
+        assertTrue(CoopNpcFleetSuppressor.coverageLine("transient", "FieldRepairsScript", false)
                 .contains("KEPT"));
-        assertTrue(CoopNpcFleetSuppressor.coverageLine("transient", "SlipstreamManager", false)
+        assertTrue(CoopNpcFleetSuppressor.coverageLine("transient", "SlipstreamManager", true)
+                .contains("SUPPRESSED"));
+        assertTrue(CoopNpcFleetSuppressor.coverageLine("transient", "SlipstreamManager", true)
                 .contains("[transient] SlipstreamManager"));
     }
 
@@ -554,15 +681,24 @@ class CoopNpcFleetSuppressorTest {
     private static final class SlipstreamManager extends NoOpScript {
     }
 
+    private static final class FieldRepairsScript extends NoOpScript {
+    }
+
     private static final class HostileActivityManager extends NoOpScript {
     }
 
     /** A fleet the sweep either culls or preserves, depending on its coop memory tag. */
     private static final class FakeSweptFleet {
         private final Map<String, Object> memory;
+        private final String factionId;
 
         private FakeSweptFleet(Map<String, Object> memory) {
+            this(memory, Factions.PIRATES);
+        }
+
+        private FakeSweptFleet(Map<String, Object> memory, String factionId) {
             this.memory = new HashMap<>(memory);
+            this.factionId = factionId;
         }
 
         private static FakeSweptFleet plain() {
@@ -582,6 +718,9 @@ class CoopNpcFleetSuppressorTest {
                         case "hashCode" -> System.identityHashCode(this);
                         case "equals" -> proxy == args[0];
                         case "isStationMode" -> Boolean.FALSE;
+                        case "getFaction" -> Proxy.newProxyInstance(
+                                FactionAPI.class.getClassLoader(), new Class<?>[]{FactionAPI.class},
+                                (f, fm, fargs) -> "getId".equals(fm.getName()) ? factionId : null);
                         case "getMemoryWithoutUpdate" -> Proxy.newProxyInstance(
                                 MemoryAPI.class.getClassLoader(),
                                 new Class<?>[]{MemoryAPI.class},
@@ -592,6 +731,7 @@ class CoopNpcFleetSuppressorTest {
                                     case "getBoolean" ->
                                             Boolean.TRUE.equals(memory.get(String.valueOf(margs[0])));
                                     case "contains" -> memory.containsKey(String.valueOf(margs[0]));
+                                    case "get" -> memory.get(String.valueOf(margs[0]));
                                     default -> null;
                                 });
                         default -> null;
@@ -663,9 +803,37 @@ class CoopNpcFleetSuppressorTest {
         }
     }
 
+    @FunctionalInterface
+    private interface GhostReplacementCase {
+        void run(RecordingSector sector, SectorAPI api, EveryFrameScript replacement);
+    }
+
+    private static void withGhostReplacement(GhostReplacementCase test) {
+        SectorAPI oldSector = Global.getSector();
+        SettingsAPI oldSettings = Global.getSettings();
+        RecordingSector sector = new RecordingSector();
+        SectorAPI api = sector.proxy();
+        SettingsAPI baseSettings = ApiProxies.whiteSettings();
+        Global.setSector(api);
+        Global.setSettings((SettingsAPI) Proxy.newProxyInstance(SettingsAPI.class.getClassLoader(),
+                new Class<?>[]{SettingsAPI.class}, (proxy, method, args) ->
+                        method.getName().equals("getVersionString") ? CoopPresenceRegistry.PINNED_VERSION
+                                : method.invoke(baseSettings, args)));
+        try {
+            CoopSensorGhostManager.install(api, true);
+            Object replacement = sector.memory.get("$ghostManager");
+            assertTrue(replacement instanceof CoopSensorGhostManager);
+            test.run(sector, api, (EveryFrameScript) replacement);
+        } finally {
+            Global.setSector(oldSector);
+            Global.setSettings(oldSettings);
+        }
+    }
+
     /** SectorAPI recording script removals and sector-memory writes. */
     private static final class RecordingSector {
         private final List<EveryFrameScript> scripts = new ArrayList<>();
+        private final List<EveryFrameScript> transientScripts = new ArrayList<>();
         private final List<EveryFrameScript> removed = new ArrayList<>();
         private final Map<String, Object> memory = new HashMap<>();
 
@@ -686,6 +854,7 @@ class CoopNpcFleetSuppressorTest {
                             yield null;
                         }
                         case "contains" -> memory.containsKey((String) args[0]);
+                        case "get" -> memory.get((String) args[0]);
                         case "getBoolean" -> Boolean.TRUE.equals(memory.get((String) args[0]));
                         default -> null;
                     });
@@ -698,10 +867,14 @@ class CoopNpcFleetSuppressorTest {
                         case "hashCode" -> System.identityHashCode(proxy);
                         case "equals" -> proxy == args[0];
                         case "getScripts" -> new ArrayList<>(scripts);
-                        case "getTransientScripts" -> new ArrayList<EveryFrameScript>();
+                        case "getTransientScripts" -> new ArrayList<>(transientScripts);
+                        case "addTransientScript" -> {
+                            transientScripts.add((EveryFrameScript) args[0]);
+                            yield null;
+                        }
                         case "removeScript", "removeTransientScript" -> {
                             EveryFrameScript script = (EveryFrameScript) args[0];
-                            if (scripts.remove(script)) {
+                            if (scripts.remove(script) || transientScripts.remove(script)) {
                                 removed.add(script);
                             }
                             yield null;

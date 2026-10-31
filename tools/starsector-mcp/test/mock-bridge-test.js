@@ -15,13 +15,15 @@ import {
   BridgeUnreachableError,
   READ_ONLY_COMMANDS
 } from '../lib/bridge-client.js';
-import { DEFAULT_IGNORE_KEYS, diffJson, leafCount, pickKeyField } from '../lib/diff.js';
+import { DEFAULT_IGNORE_KEYS, diffEncounters, diffJson, diffLights, diffStorms, leafCount, pickKeyField } from '../lib/diff.js';
+import { validateStormArgs } from '../lib/storms.js';
 import {
   ACTION_VERBS,
   Bridges,
   NON_VERBS,
   QUERY_VERBS,
   ssAct,
+  ssAlignClocks,
   ssAdvanceDays,
   ssDiff,
   ssDump,
@@ -222,12 +224,12 @@ test('does not retry a mutating command after a mid-request drop; throws BridgeO
   assert.equal(bridge.requests[0].cmd, 'give');
 });
 
-test('READ_ONLY_COMMANDS is exactly the fifteen read verbs and none of the mutations', () => {
+test('READ_ONLY_COMMANDS is exactly the read verbs and none of the mutations', () => {
   assert.deepEqual(
     [...READ_ONLY_COMMANDS].sort(),
     [
-      'barpool', 'cargo', 'colonizable', 'entities', 'feed', 'fleets', 'hirable', 'intel',
-      'landmarks', 'market', 'markets', 'screen', 'status', 'survey', 'visibility'
+      'barpool', 'cargo', 'colonizable', 'encounters', 'entities', 'feed', 'fleets', 'ghosts', 'hirable', 'intel',
+      'landmarks', 'lights', 'market', 'markets', 'screen', 'status', 'storms', 'streams', 'survey', 'visibility', 'wrecks'
     ]
   );
   // save and mark are actions even though neither changes the campaign: save writes a file and
@@ -236,7 +238,8 @@ test('READ_ONLY_COMMANDS is exactly the fifteen read verbs and none of the mutat
   // alone, so it is classed by its worst case.
   for (const mutation of [
     'teleport', 'pause', 'ability', 'setcr', 'give', 'addship', 'objective', 'surveyset',
-    'expedition', 'rep', 'netfault', 'save', 'mark', 'memory'
+    'expedition', 'rep', 'netfault', 'save', 'mark', 'memory', 'streamadd', 'streamdespawn',
+    'wreckspawn', 'wreckconsume', 'encounterspawn', 'lightspawn', 'lightgrantfault', 'lightmessagehold', 'ghostspawn', 'course'
   ]) {
     assert.ok(!READ_ONLY_COMMANDS.has(mutation), `${mutation} must not be in the read-only allowlist`);
   }
@@ -245,6 +248,719 @@ test('READ_ONLY_COMMANDS is exactly the fifteen read verbs and none of the mutat
 test('the read-only allowlist and the ss_dump verb table are the same set', () => {
   assert.deepEqual([...READ_ONLY_COMMANDS].sort(), [...QUERY_VERBS].sort(),
     'a verb ss_dump accepts but the client will not retry, or vice versa, is a wiring slip');
+});
+
+test('dropped ambient queries retry once, while triggers and clock alignment are not replayed', async (t) => {
+  const calls = new Map();
+  const bridge = new MockBridge((request) => {
+    const count = (calls.get(request.cmd) ?? 0) + 1;
+    calls.set(request.cmd, count);
+    return count === 1 ? { drop: true } : { ok: true, data: { campaignTimestamp: 123, count: 0, streams: {} } };
+  });
+  await bridge.start();
+  const client = clientFor(bridge);
+  t.after(async () => {
+    client.close();
+    await bridge.stop();
+  });
+
+  assert.equal((await client.send('streams')).campaignTimestamp, 123);
+  assert.equal(calls.get('streams'), 2);
+  assert.equal((await client.send('wrecks')).campaignTimestamp, 123);
+  assert.equal(calls.get('wrecks'), 2);
+  assert.equal((await client.send('encounters')).campaignTimestamp, 123);
+  assert.equal(calls.get('encounters'), 2);
+  assert.equal((await client.send('lights')).campaignTimestamp, 123);
+  assert.equal(calls.get('lights'), 2);
+  assert.equal((await client.send('storms')).campaignTimestamp, 123);
+  assert.equal(calls.get('storms'), 2);
+  assert.equal((await client.send('ghosts')).campaignTimestamp, 123);
+  assert.equal(calls.get('ghosts'), 2);
+  for (const cmd of ['streamadd', 'streamdespawn', 'clockalign', 'wreckspawn', 'wreckconsume', 'encounterspawn', 'lightspawn', 'lightgrantfault', 'lightmessagehold', 'ghostspawn', 'course']) {
+    await assert.rejects(() => client.send(cmd), BridgeOutcomeUnknownError);
+    assert.equal(calls.get(cmd), 1, `${cmd} must not be replayed after a lost response`);
+  }
+});
+
+test('native course setup and clearing stay action-only and preserve arguments', async (t) => {
+  const hostBridge = new MockBridge(request => ({ ok:true, data:{ nativeCourse:true, args:request.args } }));
+  const guestBridge = new MockBridge(() => ({ ok:false, error:'IllegalStateException: Course setup requires paused campaign' }));
+  await hostBridge.start(); await guestBridge.start();
+  const bridges=bridgesFor(hostBridge.port,guestBridge.port);
+  t.after(async()=>{bridges.closeAll();await hostBridge.stop();await guestBridge.stop();});
+  for(const args of [{x:125,y:-35},{clear:true}])
+    assert.deepEqual(await ssAct(bridges,'host','course',args),{nativeCourse:true,args});
+  await assert.rejects(()=>ssAct(bridges,'guest','course',{x:0,y:0}),/paused campaign/);
+  await assert.rejects(()=>ssDump(bridges,'host','course'),/unknown query verb/);
+});
+
+test('ghost diagnostics and native setup preserve results and role refusals', async (t) => {
+  const table = { cacheType: 'coop.campaign.CoopSensorGhostManager', ownedCachedHandle: true,
+    managers: [], trails: [{ id: 'trail-a', segments: [{ identity: 'local-7', discovered: true }] }] };
+  const hostBridge = new MockBridge((request) => request.cmd === 'ghosts'
+    ? { ok: true, data: table }
+    : request.args.kind === 'leviathan'
+      ? { ok: true, data: { created: 1, kind: request.args.kind } }
+      : { ok: false, error: 'IllegalStateException: Cosmetic setup requires Guest' });
+  const guestBridge = new MockBridge((request) => request.cmd === 'ghosts'
+    ? { ok: true, data: table }
+    : request.args.kind === 'charger'
+      ? { ok: true, data: { created: 0, refusedByNativeCreator: true } }
+      : { ok: false, error: 'IllegalStateException: Trail setup requires Host' });
+  await hostBridge.start(); await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => { bridges.closeAll(); await hostBridge.stop(); await guestBridge.stop(); });
+  assert.deepEqual(await ssDump(bridges, 'guest', 'ghosts'), table);
+  assert.deepEqual(await ssAct(bridges, 'host', 'ghostspawn', { kind: 'leviathan' }), { created: 1, kind: 'leviathan' });
+  assert.deepEqual(await ssAct(bridges, 'guest', 'ghostspawn', { kind: 'charger' }), { created: 0, refusedByNativeCreator: true });
+  await assert.rejects(() => ssAct(bridges, 'guest', 'ghostspawn', { kind: 'calf' }), /Trail setup requires Host/);
+  await assert.rejects(() => ssAct(bridges, 'host', 'ghostspawn', { kind: 'charger' }), /Cosmetic setup requires Guest/);
+  await assert.rejects(() => ssDump(bridges, 'host', 'ghostspawn'), /unknown query verb/);
+  await assert.rejects(() => ssAct(bridges, 'host', 'ghosts'), /unknown action verb/);
+});
+
+test('encounter query and native QA creation preserve arguments and guest refusal', async (t) => {
+  const table = { campaignTimestamp: 123, truncated: false, encounters: {} };
+  const hostBridge = new MockBridge((request) => request.cmd === 'encounters'
+    ? { ok: true, data: table } : { ok: true, data: { created: true, createdCount: 1, args: request.args } });
+  const guestBridge = new MockBridge((request) => request.cmd === 'encounters'
+    ? { ok: true, data: table } : { ok: false, error: 'IllegalStateException: encounterspawn is host-only' });
+  await hostBridge.start(); await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => { bridges.closeAll(); await hostBridge.stop(); await guestBridge.stop(); });
+  const args = { creator: 'dire', x: -61234.5, y: 25000, depth: 3, threatRollRan: false, seed: '-9223372036854775808' };
+  assert.deepEqual(await ssDump(bridges, 'guest', 'encounters'), table);
+  assert.deepEqual(await ssAct(bridges, 'host', 'encounterspawn', args), { created: true, createdCount: 1, args });
+  await assert.rejects(() => ssAct(bridges, 'guest', 'encounterspawn', args), /host-only/);
+  await assert.rejects(() => ssDump(bridges, 'host', 'encounterspawn'), /unknown query verb/);
+  await assert.rejects(() => ssAct(bridges, 'host', 'encounters'), /unknown action verb/);
+});
+
+const LIGHT_ID = 'light:01234567-89ab-4def-8123-0123456789ab';
+function lightManifest() {
+  return { campaignTimestamp: -55633163748062, count: 1, candidateCount: 1, truncated: false,
+    lights: { [LIGHT_ID]: { id: LIGHT_ID, engineId: 'host-native-light', hostEntityId: 'native-host-light', managed: true,
+      x: -62000.25, y: -45000, colorArgb: -1, frequencyMultMin: 0.7, frequencyMultMax: 1.3,
+      frequencyChangeMult: 1, size: 120, detectedRange: 600, bonusMult: 1.5,
+      remainingDays: 19.25, pointsOverride: -1, radius: 60, dweller: false,
+      salvageSeed: '-9223372036854775808', despawning: false } }, state: { consumedCount: 2 } };
+}
+
+test('light query and native QA creation preserve arguments and refuse the wrong verb class', async (t) => {
+  const table = lightManifest();
+  const hostBridge = new MockBridge((request) => request.cmd === 'lights'
+    ? { ok: true, data: { ...table, args: request.args } }
+    : { ok: true, data: { createdCount: 3, args: request.args } });
+  const guestBridge = new MockBridge((request) => request.cmd === 'lights'
+    ? { ok: true, data: table } : { ok: false, error: 'IllegalStateException: lightspawn is host-only' });
+  await hostBridge.start(); await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => { bridges.closeAll(); await hostBridge.stop(); await guestBridge.stop(); });
+  assert.deepEqual((await ssDump(bridges, 'host', 'lights', { limit: 512 })).args, { limit: 512 });
+  const args = { kind: 'cluster', x: -60000.5, y: -45000, seed: '-9223372036854775808' };
+  assert.deepEqual(await ssAct(bridges, 'host', 'lightspawn', args), { createdCount: 3, args });
+  await assert.rejects(() => ssAct(bridges, 'guest', 'lightspawn', args), /host-only/);
+  await assert.rejects(() => ssDump(bridges, 'host', 'lightspawn'), /unknown query verb/);
+  await assert.rejects(() => ssAct(bridges, 'host', 'lights'), /unknown action verb/);
+});
+
+test('lightgrantfault arm, status and disarm stay action-only and preserve opaque arguments and replies', async (t) => {
+  const requestId = 'a6288349-e51d-4e20-867c-315c0da61599';
+  const cases = [
+    { args: { mode: 'arm', requestId }, reply: { qa: true, armed: true, tripped: false, requestId } },
+    { args: { mode: 'status', requestId }, reply: { qa: true, armed: false, tripped: true, requestId,
+      trip: { requestId, stage: 'after-native-grant' } } },
+    { args: { mode: 'disarm', requestId }, reply: { qa: true, armed: false, tripped: true, requestId,
+      disarmed: true } }
+  ];
+  const bridge = new MockBridge((request) => {
+    assert.equal(request.cmd, 'lightgrantfault');
+    const example = cases.find((item) => item.args.mode === request.args.mode);
+    assert.ok(example, 'only the three explicit transport cases should reach this mock');
+    return { ok: true, data: example.reply };
+  });
+  await bridge.start();
+  const bridges = bridgesFor(bridge.port, bridge.port);
+  t.after(async () => { bridges.closeAll(); await bridge.stop(); });
+
+  assert.equal(ACTION_VERBS.filter((verb) => verb === 'lightgrantfault').length, 1);
+  assert.ok(!QUERY_VERBS.includes('lightgrantfault'));
+  assert.ok(!READ_ONLY_COMMANDS.has('lightgrantfault'), 'even status shares an arm/disarm verb, so cannot retry');
+  for (const { args, reply } of cases) {
+    assert.deepEqual(await ssAct(bridges, 'guest', 'lightgrantfault', args), reply);
+    assert.deepEqual(bridge.requests.at(-1).args, args, 'MCP must not normalize or discard mode/request identity');
+  }
+  await assert.rejects(() => ssDump(bridges, 'guest', 'lightgrantfault', { mode: 'status' }),
+    /unknown query verb "lightgrantfault"/);
+  assert.equal(bridge.requests.length, cases.length, 'the query refusal must not reach the bridge');
+});
+
+test('lightgrantfault relays Host, invalid mode and invalid request refusals from the bridge', async (t) => {
+  const hostError = 'IllegalStateException: lightgrantfault is guest-only';
+  const modeError = 'IllegalArgumentException: lightgrantfault mode must be arm|status|disarm';
+  const requestError = 'IllegalArgumentException: lightgrantfault requestId must be a UUID';
+  const hostBridge = new MockBridge(() => ({ ok: false, error: hostError }));
+  const guestBridge = new MockBridge((request) => ({ ok: false,
+    error: request.args.mode === 'invalid-mode' ? modeError : requestError }));
+  await hostBridge.start(); await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => { bridges.closeAll(); await hostBridge.stop(); await guestBridge.stop(); });
+  const cases = [
+    { instance: 'host', bridge: hostBridge,
+      args: { mode: 'arm', requestId: 'a6288349-e51d-4e20-867c-315c0da61599' }, error: hostError },
+    { instance: 'guest', bridge: guestBridge, args: { mode: 'invalid-mode', requestId: 'opaque-request' }, error: modeError },
+    { instance: 'guest', bridge: guestBridge, args: { mode: 'arm', requestId: 'not-a-UUID' }, error: requestError }
+  ];
+  for (const { instance, bridge, args, error } of cases) {
+    await assert.rejects(() => ssAct(bridges, instance, 'lightgrantfault', args), (caught) => {
+      assert.ok(caught instanceof BridgeError);
+      assert.equal(caught.instance, instance);
+      assert.equal(caught.cmd, 'lightgrantfault');
+      assert.equal(caught.bridgeError, error);
+      return true;
+    });
+    assert.deepEqual(bridge.requests.at(-1).args, args, 'validation belongs to the Java bridge');
+  }
+  assert.equal(hostBridge.requests.length + guestBridge.requests.length, cases.length);
+});
+
+test('lightmessagehold keeps all modes action-only and preserves captured message receipts', async (t) => {
+  const modes = [
+    { mode: 'arm', stage: 'claim_reply', lightId: LIGHT_ID, seconds: 30 },
+    { mode: 'status' }, { mode: 'release' }, { mode: 'drop' },
+    { mode: 'arm', stage: 'consumption_request', lightId: LIGHT_ID, action: 'DWELLER', seconds: 600 }
+  ];
+  const receipt = { qa: true, armed: true, held: true, requestId: 'original-native-request',
+    claimToken: 'original-native-token', suppressedRetries: 2 };
+  const bridge = new MockBridge((request) => ({ ok: true, data: { ...receipt, args: request.args } }));
+  await bridge.start();
+  const bridges = bridgesFor(bridge.port, bridge.port);
+  t.after(async () => { bridges.closeAll(); await bridge.stop(); });
+  assert.ok(ACTION_VERBS.includes('lightmessagehold'));
+  assert.ok(!QUERY_VERBS.includes('lightmessagehold'));
+  assert.ok(!READ_ONLY_COMMANDS.has('lightmessagehold'));
+  for (const args of modes) {
+    assert.deepEqual(await ssAct(bridges, 'host', 'lightmessagehold', args), { ...receipt, args });
+    assert.deepEqual(bridge.requests.at(-1).args, args);
+  }
+  await assert.rejects(() => ssDump(bridges, 'host', 'lightmessagehold', { mode: 'status' }), /unknown query verb/);
+  assert.equal(bridge.requests.length, modes.length);
+});
+
+test('screen and light probes preserve nonce, deferred lifecycle and native tag evidence', async (t) => {
+  const deferred = { pending: [], journal: [{ observationId: 'attempt-1', originalClaimToken: 'claim-1',
+    state: 'cancelled', reason: 'light_fading', actionExecutionCount: 0 }], maxEvents: 256, evictedEvents: 0 };
+  const screen = { lightInteraction: { claimState: { manualToken: 'claim-2' }, deferredActions: deferred,
+    nativeLight: { complete: true, matches: 1, entities: [{ fadingOutAndExpiring: true }] } } };
+  const lights = { ...lightManifest(), lightClaims: { preclaimToken: 'claim-2' }, deferredActions: deferred };
+  const bridge = new MockBridge((request) => ({ ok: true, data: request.cmd === 'screen' ? screen : lights }));
+  await bridge.start();
+  const bridges = bridgesFor(bridge.port, bridge.port);
+  t.after(async () => { bridges.closeAll(); await bridge.stop(); });
+  assert.deepEqual(await ssDump(bridges, 'guest', 'screen', { lightId: LIGHT_ID }), screen);
+  assert.deepEqual(await ssDump(bridges, 'guest', 'lights'), lights);
+  assert.deepEqual(bridge.requests.map((request) => request.cmd), ['screen', 'lights']);
+});
+
+test('strict light diff excludes local identity metadata and actor-local counts only', () => {
+  const host = lightManifest(); const guest = structuredClone(host);
+  guest.lights[LIGHT_ID].engineId = 'guest-native-light';
+  guest.state = { consumedCount: 100, pendingRequests: 4 };
+  host.lightClaims = { manualToken: 'host-local-token' };
+  guest.lightClaims = { preclaimToken: 'guest-local-token' };
+  host.deferredActions = { pending: [], journal: [], evictedEvents: 0 };
+  guest.deferredActions = { pending: [], journal: [{ reason: 'dialog_closed' }], evictedEvents: 4 };
+  const result = diffLights(host, guest);
+  assert.equal(result.status, 'PASS'); assert.equal(result.equal, true);
+  assert.equal(result.calendarMatched, true); assert.equal(result.resolutionFailureCount, 0);
+  assert.equal(result.counts.differing, 0); assert.ok(result.counts.host > 10);
+  assert.deepEqual(result.ignored, ['engineId']);
+  assert.equal(diffLights(host, guest, { ignore: [] }).equal, true);
+});
+
+test('strict light diff retains exact mismatch totals while bounding displayed recipe differences', () => {
+  const host = lightManifest(); host.lights[LIGHT_ID].recipe = { nativeSeed: '9223372036854775806' };
+  const guest = structuredClone(host); const row = guest.lights[LIGHT_ID];
+  row.x += 1; row.colorArgb = -2; row.dweller = true; row.salvageSeed = '9223372036854775807';
+  row.remainingDays -= 0.5; row.recipe.nativeSeed = '9223372036854775807';
+  const result = diffLights(host, guest, { maxDifferences: 2 });
+  assert.equal(result.status, 'FAIL'); assert.equal(result.equal, false);
+  assert.equal(result.counts.differing, 6); assert.equal(result.differences.length, 2);
+  assert.equal(result.truncated, true);
+  assert.ok(result.differences.every((difference) => difference.path.startsWith(`$.lights.${LIGHT_ID}.`)));
+  assert.equal(diffLights(host, guest).differences.some((d) => d.path.endsWith('.recipe.nativeSeed')), true);
+});
+
+test('strict light diff refuses incomplete or noncanonical manifests and malformed native recipes', () => {
+  const host = lightManifest();
+  for (const change of [
+    (table) => { table.truncated = true; },
+    (table) => { table.count = 0; },
+    (table) => { table.candidateCount = 2; },
+    (table) => { table.lights[LIGHT_ID].managed = false; },
+    (table) => { table.lights[LIGHT_ID].id = 'light:invalid'; },
+    (table) => { table.lights[LIGHT_ID].engineId = ''; },
+    (table) => { delete table.lights[LIGHT_ID].hostEntityId; },
+    (table) => { table.lights[LIGHT_ID].hostEntityId = ' '; },
+    (table) => { table.lights[LIGHT_ID].hostEntityId = 123; },
+    (table) => { delete table.lights[LIGHT_ID].remainingDays; },
+    (table) => { table.lights[LIGHT_ID].x = NaN; },
+    (table) => { table.lights[LIGHT_ID].remainingDays = -0.001; },
+    (table) => { table.lights[LIGHT_ID].dweller = 'true'; },
+    (table) => { table.lights[LIGHT_ID].salvageSeed = 123; },
+    (table) => { table.lights[LIGHT_ID].salvageSeed = '9223372036854775808'; },
+    (table) => { table.lights[LIGHT_ID].dweller = true; table.lights[LIGHT_ID].salvageSeed = null; }
+  ]) {
+    const malformed = structuredClone(host); change(malformed);
+    assert.throws(() => diffLights(host, malformed), /lights.*(manifest|requires)/);
+    assert.throws(() => diffLights(malformed, malformed), /lights.*(manifest|requires)/,
+      'identically malformed manifests cannot produce PASS');
+  }
+  const duplicate = structuredClone(host);
+  const otherId = 'light:11234567-89ab-4def-8123-0123456789ab';
+  duplicate.lights[otherId] = { ...duplicate.lights[LIGHT_ID], id: otherId };
+  duplicate.count = duplicate.candidateCount = 2;
+  assert.throws(() => diffLights(duplicate, duplicate), /unique managed canonical identities/);
+  duplicate.lights[otherId].engineId = 'another-local-engine-id';
+  assert.throws(() => diffLights(duplicate, duplicate), /unique nonempty host entity identities/);
+  assert.throws(() => diffLights(host, host, { tolerance: 1 }), /exact comparison/);
+  assert.throws(() => diffLights(host, host, { ignore: ['x'] }), /cannot be ignored/);
+  assert.throws(() => diffLights(host, host, { maxDifferences: 0 }), /maxDifferences/);
+});
+
+test('light diagnostics preserve negative fading lifetime while rejecting negative live lifetime', () => {
+  const fading = lightManifest();
+  fading.lights[LIGHT_ID].remainingDays = -0.0001;
+  fading.lights[LIGHT_ID].despawning = true;
+  assert.equal(diffLights(fading, structuredClone(fading)).status, 'PASS');
+  const guest = structuredClone(fading); guest.lights[LIGHT_ID].remainingDays = -0.0002;
+  const result = diffLights(fading, guest);
+  assert.equal(result.status, 'FAIL');
+  assert.equal(result.differences[0].path, `$.lights.${LIGHT_ID}.remainingDays`);
+  fading.lights[LIGHT_ID].despawning = false;
+  assert.throws(() => diffLights(fading, fading), /invalid native recipe/);
+});
+
+test('dweller salvage seeds stay exact signed-64 strings and ordinary lights may omit the native seed', () => {
+  const ordinary = lightManifest(); ordinary.lights[LIGHT_ID].salvageSeed = null;
+  assert.equal(diffLights(ordinary, structuredClone(ordinary)).status, 'PASS');
+  for (const seed of ['-9223372036854775808', '9223372036854775807']) {
+    const dweller = lightManifest(); dweller.lights[LIGHT_ID].dweller = true;
+    dweller.lights[LIGHT_ID].salvageSeed = seed;
+    assert.equal(diffLights(dweller, structuredClone(dweller)).status, 'PASS');
+  }
+  const host = lightManifest(); host.lights[LIGHT_ID].dweller = true;
+  host.lights[LIGHT_ID].salvageSeed = '9223372036854775806';
+  const guest = structuredClone(host); guest.lights[LIGHT_ID].salvageSeed = '9223372036854775807';
+  assert.equal(diffLights(host, guest).status, 'FAIL');
+});
+
+test('light membership differences are explicit and empty complete manifests are valid', () => {
+  const host = lightManifest();
+  const empty = { ...host, lights: {}, count: 0, candidateCount: 0 };
+  const result = diffLights(host, empty);
+  assert.equal(result.status, 'FAIL'); assert.equal(result.counts.differing, 1);
+  assert.equal(result.differences[0].path, `$.lights.${LIGHT_ID}`);
+  assert.equal(result.differences[0].missing, 'guest');
+  assert.equal(diffLights(empty, structuredClone(empty)).status, 'PASS');
+});
+
+test('light clock mismatch is INCONCLUSIVE even when fields match or tolerance could hide the clock', () => {
+  const host = lightManifest(); const guest = structuredClone(host); guest.campaignTimestamp++;
+  const result = diffLights(host, guest);
+  assert.equal(result.status, 'INCONCLUSIVE'); assert.equal(result.equal, false);
+  assert.equal(result.calendarMatched, false); assert.equal(result.counts.differing, 0);
+  guest.lights[LIGHT_ID].remainingDays -= 1;
+  assert.equal(diffLights(host, guest).counts.differing, 1);
+  assert.equal(diffLights(host, guest).status, 'INCONCLUSIVE');
+  host.campaignTimestamp = guest.campaignTimestamp = Number.MAX_SAFE_INTEGER + 1;
+  assert.equal(diffLights(host, guest).status, 'INCONCLUSIVE');
+});
+
+test('ss_diff lights uses the strict manifest and raw-calendar comparator', async (t) => {
+  const host = lightManifest(); const guest = structuredClone(host); guest.lights[LIGHT_ID].engineId = 'guest-light';
+  const hostBridge = new MockBridge(() => ({ ok: true, data: host }));
+  const guestBridge = new MockBridge(() => ({ ok: true, data: guest }));
+  await hostBridge.start(); await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => { bridges.closeAll(); await hostBridge.stop(); await guestBridge.stop(); });
+  assert.equal((await ssDiff(bridges, 'lights', { limit: 512 })).status, 'PASS');
+  guest.campaignTimestamp++;
+  assert.equal((await ssDiff(bridges, 'lights')).status, 'INCONCLUSIVE');
+  guest.campaignTimestamp = host.campaignTimestamp; guest.lights[LIGHT_ID].bonusMult++;
+  assert.equal((await ssDiff(bridges, 'lights')).status, 'FAIL');
+  guest.truncated = true;
+  await assert.rejects(() => ssDiff(bridges, 'lights'), /complete untruncated manifest/);
+});
+
+function stormManifest(role = 'HOST') {
+  return { available: true, role, timestamp: -55628015052062, revision: 7, generation: 3,
+    commitTimestamp: -55628115052062, snapshotTimestamp: -55628015052062,
+    width: 8, height: 4, gridHash: 'a'.repeat(64), trackerCount: 2, pendingControlCount: 0,
+    cells: [
+      { i: 2, j: 1, gridValue: 1, state: 'SIGNAL', epoch: 11,
+        wait: 0, signal: 0.25, wane: 0, maxSignal: 1, maxWane: 0, timeScale: 1 },
+      { i: 3, j: 1, gridValue: 0, state: 'ABSENT', epoch: 0,
+        wait: 0, signal: 0, wane: 0, maxSignal: 0, maxWane: 0, timeScale: 0 }
+    ] };
+}
+
+test('storm selectors validate global indices, bounds, uniqueness and explicit coverage', () => {
+  assert.deepEqual(validateStormArgs(), { limit: 128, cells: [] });
+  assert.deepEqual(validateStormArgs({ cells: ' 02, 1 ; 3,1 ', limit: 2 }),
+    { limit: 2, cells: ['2,1', '3,1'] });
+  for (const args of [null, [], { x: 100 }, { limit: '2' }, { limit: 0 }, { limit: 129 },
+    { limit: 1.5 }, { cells: null }, { cells: ['2,1'] }, { cells: '2' }, { cells: '2,1;' },
+    { cells: '-1,2' }, { cells: '2.1,1' }, { cells: '2,1;02,1' }, { cells: '2147483648,0' },
+    { cells: '2,1;3,1', limit: 1 }, { cells: Array.from({ length: 129 }, (_, i) => `${i},0`).join(';') }]) {
+    assert.throws(() => validateStormArgs(args), /storms/);
+  }
+});
+
+test('malformed storm arguments are refused before any bridge request', async () => {
+  const bridges = { get() { throw new Error('bridge must not be consulted'); } };
+  await assert.rejects(() => ssDump(bridges, 'host', 'storms', { cells: '0,0;', limit: 2 }), /storms cells/);
+  await assert.rejects(() => ssDiff(bridges, 'storms', { limit: 0 }), /storms limit/);
+  await assert.rejects(() => ssAct(bridges, 'host', 'storms'), /unknown action verb/);
+});
+
+test('storm comparison is exact and order-independent at the same global indices', () => {
+  const host = stormManifest(); const guest = stormManifest('GUEST');
+  guest.cells.reverse(); guest.trackerCount = 3;
+  const result = diffStorms(host, guest);
+  assert.equal(result.status, 'PASS'); assert.equal(result.equal, true);
+  assert.equal(result.comparedCellCount, 2);
+  assert.deepEqual(result.sampleCoverage.commonGlobalCells, ['2,1', '3,1']);
+  assert.equal(result.snapshots.guest.trackerCount, 3, 'local tracker census is diagnostic, not a global equality claim');
+});
+
+test('storm grid/generation and every native sampled timer remain gameplay comparisons', () => {
+  const host = stormManifest();
+  for (const mutate of [
+    (table) => { table.gridHash = 'b'.repeat(64); }, (table) => { table.generation++; },
+    (table) => { table.commitTimestamp--; }, (table) => { table.width++; },
+    (table) => { table.cells[0].gridValue = 2; }, (table) => { table.cells[0].state = 'STORM'; },
+    ...['epoch', 'wait', 'signal', 'wane', 'maxSignal', 'maxWane', 'timeScale'].map((field) =>
+      (table) => { table.cells[0][field]++; })
+  ]) {
+    const guest = stormManifest('GUEST'); mutate(guest);
+    const result = diffStorms(host, guest);
+    assert.equal(result.status, 'FAIL'); assert.equal(result.equal, false);
+    assert.ok(result.differences.length > 0);
+  }
+});
+
+test('local storm execution evidence is returned separately from shared-weather equality', () => {
+  const host = stormManifest(); const guest = stormManifest('GUEST');
+  host.execution = { enabled: true, sequence: 1, counts: { 'OWNER.velocityWrites': 1 },
+    events: [{ fleetId: 'host-owner', action: 'velocityWrites' }] };
+  guest.execution = { enabled: true, sequence: 0, counts: { 'OWNER.velocityWrites': 0 }, events: [] };
+  assert.equal(diffStorms(host, guest).status, 'PASS');
+  assert.equal(host.execution.counts['OWNER.velocityWrites'], 1);
+  assert.equal(guest.execution.counts['OWNER.velocityWrites'], 0);
+});
+
+test('storm rows from different global cells never count as equal samples', () => {
+  const host = stormManifest(); const guest = stormManifest('GUEST');
+  for (const row of guest.cells) row.i += 2;
+  const result = diffStorms(host, guest);
+  assert.equal(result.status, 'INCONCLUSIVE'); assert.equal(result.equal, false);
+  assert.equal(result.comparedCellCount, 0);
+  assert.deepEqual(result.sampleCoverage.hostOnlyGlobalCells, ['2,1', '3,1']);
+  assert.deepEqual(result.sampleCoverage.guestOnlyGlobalCells, ['4,1', '5,1']);
+  assert.match(result.reason, /no common global/);
+});
+
+test('storm common-cell comparison reports one-sided sampling and missing explicit selectors', () => {
+  const host = stormManifest(); const guest = stormManifest('GUEST'); guest.cells.pop();
+  assert.equal(diffStorms(host, guest).status, 'PASS');
+  assert.deepEqual(diffStorms(host, guest).sampleCoverage.hostOnlyGlobalCells, ['3,1']);
+  const requested = diffStorms(host, guest, { requestedCells: ['2,1', '3,1'] });
+  assert.equal(requested.status, 'INCONCLUSIVE');
+  assert.deepEqual(requested.sampleCoverage.missingRequestedGlobalCells.guest, ['3,1']);
+});
+
+test('storm raw-clock or authoritative-anchor differences are explicitly inconclusive', () => {
+  const host = stormManifest();
+  for (const [mutate, reason] of [
+    [(table) => { table.timestamp++; }, /raw campaign timestamps/],
+    [(table) => { table.snapshotTimestamp--; }, /snapshot\/revision lag/],
+    [(table) => { table.revision++; }, /snapshot\/revision lag/],
+    [(table) => { table.pendingControlCount = 1; }, /controls are still pending/]
+  ]) {
+    const guest = stormManifest('GUEST'); mutate(guest);
+    const result = diffStorms(host, guest);
+    assert.equal(result.status, 'INCONCLUSIVE'); assert.equal(result.equal, false);
+    assert.match(result.reason, reason);
+  }
+  const guest = stormManifest('GUEST'); guest.timestamp--;
+  assert.match(diffStorms(host, guest).reason, /snapshot is ahead/);
+});
+
+test('matching older storm anchors can project to the query clock and report local lag', () => {
+  const host = stormManifest(); const guest = stormManifest('GUEST');
+  host.snapshotTimestamp -= 1000; guest.snapshotTimestamp -= 1000;
+  const result = diffStorms(host, guest);
+  assert.equal(result.status, 'PASS'); assert.equal(result.snapshotMatched, true);
+  assert.equal(result.snapshots.host.localLagMillis, 1000);
+  assert.equal(result.snapshots.guest.localLagMillis, 1000);
+});
+
+test('an unavailable storm World is distinct from an available quiet grid', () => {
+  const host = stormManifest(); const guest = stormManifest('GUEST');
+  guest.available = false;
+  for (const key of ['timestamp', 'revision', 'generation', 'gridHash', 'cells']) delete guest[key];
+  const result = diffStorms(host, guest);
+  assert.equal(result.status, 'INCONCLUSIVE'); assert.equal(result.availability.guest, false);
+  assert.match(result.reason, /not an empty grid/);
+  const quietHost = stormManifest(); quietHost.trackerCount = 0; quietHost.cells.shift();
+  const quietGuest = structuredClone(quietHost); quietGuest.role = 'GUEST';
+  assert.equal(diffStorms(quietHost, quietGuest).status, 'PASS');
+});
+
+test('storm validation rejects malformed diagnostics even when both sides are equally broken', () => {
+  for (const mutate of [
+    (table) => { delete table.available; }, (table) => { table.role = 'NONE'; },
+    (table) => { table.timestamp = '123'; }, (table) => { delete table.snapshotTimestamp; },
+    (table) => { table.revision = -1; }, (table) => { table.gridHash = 'unavailable'; },
+    (table) => { table.width = 0; }, (table) => { table.trackerCount = 100; },
+    (table) => { table.pendingControlCount = -1; }, (table) => { table.cells = {}; },
+    (table) => { table.cells.push({ ...table.cells[0] }); },
+    (table) => { table.cells[0].i = table.width; }, (table) => { table.cells[0].gridValue = 3; },
+    (table) => { table.cells[0].epoch = Number.MAX_SAFE_INTEGER + 1; },
+    (table) => { table.cells[0].epoch = -1; }, (table) => { table.cells[0].timeScale = 101; },
+    (table) => { table.cells[0].signal = 1_000_001; },
+    (table) => { table.cells[0].signal = NaN; }, (table) => { table.cells[0].state = 'unknown'; },
+    (table) => { delete table.cells[0].maxSignal; }, (table) => { table.cells[1].wait = 1; }
+  ]) {
+    const host = stormManifest(); mutate(host);
+    const guest = structuredClone(host); guest.role = 'GUEST';
+    assert.throws(() => diffStorms(host, guest), /storms/);
+  }
+});
+
+test('storm comparison refuses tolerances/ignored gameplay fields and bounds its output', () => {
+  const host = stormManifest(); const guest = stormManifest('GUEST');
+  for (const options of [{ tolerance: 0.1 }, { tolerance: '0' }, { ignore: ['signal'] },
+    { ignore: null }, { maxDifferences: 0 }, { maxDifferences: 1001 }]) {
+    assert.throws(() => diffStorms(host, guest, options), /storms|maxDifferences/);
+  }
+  guest.cells[0].wait++; guest.cells[0].signal++;
+  const result = diffStorms(host, guest, { tolerance: 0, ignore: [], maxDifferences: 1 });
+  assert.equal(result.status, 'FAIL'); assert.equal(result.differences.length, 1);
+  assert.equal(result.counts.differing, 2); assert.equal(result.truncated, true);
+});
+
+test('storm query/diff route only reads and preserves explicit coverage and bridge failures', async (t) => {
+  const host = stormManifest(); const guest = stormManifest('GUEST'); let fail = false;
+  const hostBridge = new MockBridge(() => ({ ok: true, data: host }));
+  const guestBridge = new MockBridge(() => fail
+    ? { ok: false, error: 'IllegalStateException: storm world unavailable' } : { ok: true, data: guest });
+  await hostBridge.start(); await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => { bridges.closeAll(); await hostBridge.stop(); await guestBridge.stop(); });
+  const args = { cells: '2,1;3,1', limit: 2 };
+  assert.deepEqual(await ssDump(bridges, 'host', 'storms', args), host);
+  assert.deepEqual(hostBridge.requests[0].args, args);
+  assert.equal((await ssDiff(bridges, 'storms', args)).status, 'PASS');
+  guest.cells.pop(); assert.equal((await ssDiff(bridges, 'storms', args)).status, 'INCONCLUSIVE');
+  fail = true; await assert.rejects(() => ssDiff(bridges, 'storms'), BridgeError);
+  assert.ok([...hostBridge.requests, ...guestBridge.requests].every((request) => request.cmd === 'storms'));
+});
+
+test('encounter diff compares canonical gameplay leaves and bounds precise mismatches', () => {
+  const table = { truncated: false, encounters: { same: {
+    optionalUniqueId: 'same', name: 'host name', catalogId: 'host catalog', threatTag: true,
+    recipe: { effectiveSeed: '-9223372036854775808', entities: [{ role: 'SYSTEM', ordinal: 0, specId: 'frozen' }] },
+    entities: { coopenc_same_system0: { present: true, canonicalResolves: true, locationResolves: true,
+      x: 1, radius: 25, surveyLevel: 'FULL', orbit: { focusId: 'coopenc_same_system1', radius: 300 },
+      conditions: ['cold'], hintFlags: { $visited: false } } }
+  } } };
+  const guest = structuredClone(table);
+  guest.encounters.same.name = 'guest name'; guest.encounters.same.catalogId = 'guest catalog';
+  assert.equal(diffEncounters(table, guest).equal, true);
+  guest.encounters.same.recipe.entities[0].role = 'ANCHOR';
+  guest.encounters.same.entities.coopenc_same_system0.canonicalResolves = false;
+  guest.encounters.same.entities.coopenc_same_system0.radius = 30;
+  const result = diffEncounters(table, guest, { maxDifferences: 2 });
+  assert.equal(result.equal, false); assert.equal(result.counts.differing, 3);
+  assert.equal(result.differences.length, 2); assert.equal(result.truncated, true);
+  assert.ok(result.differences.some((difference) => difference.path.endsWith('.radius')));
+  assert.ok(result.differences.every((difference) => difference.path.startsWith('$.encounters.same.')));
+  assert.equal(diffEncounters(table, guest).differences.some((difference) => difference.path.endsWith('.role')), true);
+});
+
+test('composite encounter identities compare equal across local native ids and pseudo-token lookup failures', () => {
+  const host = { truncated: false, encounters: { same: { optionalUniqueId: 'same', entities: {
+    coopenc_same_system0: { entityId: 'coopenc_same_system0', engineId: 'host-planet', present: true,
+      canonicalResolves: true, locationResolves: true, nativeSectorResolves: true,
+      nativeSectorLookupError: null, nativeSectorLookupExempt: false, nativeSectorLookupClass: 'CAMPAIGN_ENTITY',
+      orbit: { focusId: 'coopenc_same_system1', radius: 300 }, destinations: ['coopenc_same_jump_point0'] },
+    coopenc_same_system1: { entityId: 'coopenc_same_system1', engineId: 'host-center', present: true,
+      canonicalResolves: true, locationResolves: true, nativeSectorResolves: false,
+      nativeSectorLookupError: 'ClassCastException: native Host token cannot cast',
+      nativeSectorLookupExempt: true, nativeSectorLookupClass: 'LOCATION_TOKEN', targetId: 'coopenc_same_system0' }
+  } } } };
+  const guest = structuredClone(host);
+  guest.encounters.same.entities.coopenc_same_system0.engineId = 'guest-planet';
+  guest.encounters.same.entities.coopenc_same_system1.engineId = 'guest-center';
+  guest.encounters.same.entities.coopenc_same_system1.nativeSectorResolves = true;
+  guest.encounters.same.entities.coopenc_same_system1.nativeSectorLookupError = null;
+  const result = diffEncounters(host, guest);
+  assert.equal(result.equal, true); assert.equal(result.resolutionFailureCount, 0);
+  assert.ok(result.ignored.includes('engineId'));
+  assert.equal(diffEncounters(host, guest, { ignore: [] }).equal, true, 'local identity metadata is excluded independently of cosmetic options');
+  guest.encounters.same.entities.coopenc_same_system0.orbit.focusId = 'coopenc_same_system2';
+  assert.equal(diffEncounters(host, guest).equal, false, 'canonical orbit references remain gameplay fields');
+});
+
+test('identically broken canonical or location resolution cannot pass an encounter diff', () => {
+  const broken = { truncated: false, encounters: { same: { entities: {
+    coopenc_same_system0: { present: true, canonicalResolves: false, locationResolves: true },
+    coopenc_same_system1: { present: false, canonicalResolves: false, locationResolves: false }
+  } } } };
+  const result = diffEncounters(broken, structuredClone(broken), { ignore: ['canonicalResolves'] });
+  assert.equal(result.equal, false); assert.equal(result.counts.differing, 1); assert.equal(result.resolutionFailureCount, 2);
+  assert.deepEqual(result.differences[0].failedInstances, ['host', 'guest']);
+  assert.equal(result.differences[0].path, '$.encounters.same.entities.coopenc_same_system0.canonicalResolves');
+  broken.encounters.same.entities.coopenc_same_system0.canonicalResolves = true;
+  broken.encounters.same.entities.coopenc_same_system0.locationResolves = false;
+  assert.equal(diffEncounters(broken, structuredClone(broken)).equal, false);
+});
+
+test('encounter diff refuses partial manifests and summarizes a missing whole instance', () => {
+  const table = { truncated: false, encounters: { same: { recipe: { seed: '1' }, entities: {} } } };
+  assert.throws(() => diffEncounters({ ...table, truncated: true }, table), /complete untruncated/);
+  assert.throws(() => diffEncounters(table, {}), /complete untruncated/);
+  assert.throws(() => diffEncounters(table, table, { maxDifferences: 0 }), /maxDifferences/);
+  const missing = diffEncounters(table, { truncated: false, encounters: {} });
+  assert.equal(missing.equal, false);
+  assert.deepEqual(missing.differences[0], { path: '$.encounters.same', missing: 'guest',
+    host: { kind: 'object', keys: ['recipe', 'entities'], keyCount: 2 } });
+});
+
+test('encounter ss_diff requires identical sample timestamps even with ignored timestamps', async (t) => {
+  const hostBridge = new MockBridge(() => ({ ok: true, data: { campaignTimestamp: 123, truncated: false, encounters: {} } }));
+  const guestBridge = new MockBridge(() => ({ ok: true, data: { campaignTimestamp: 124, truncated: false, encounters: {} } }));
+  await hostBridge.start(); await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => { bridges.closeAll(); await hostBridge.stop(); await guestBridge.stop(); });
+  await assert.rejects(() => ssDiff(bridges, 'encounters', {}, { ignore: ['campaignTimestamp'], tolerance: 1000 }), /unmatched campaign timestamps/);
+});
+
+test('streams dump and host triggers relay their results; guest trigger refusals reach the caller', async (t) => {
+  const table = { campaignTimestamp: 123, count: 1, streams: {
+    'host-7': { id: 'host-7', kind: 'SEASONAL', segmentCount: 3, params: { burnLevel: 30 },
+      brightness: [{ distance: 0, brightness: 0.35 }] }
+  } };
+  const response = (request, instance) => {
+    if (request.cmd === 'streams') return { ok: true, data: table };
+    if (instance !== 'host') return { ok: false, error: 'IllegalStateException: stream triggers are host-only' };
+    return { ok: true, data: request.cmd === 'streamadd' ? { invoked: true, month: 4 } : { started: 1 } };
+  };
+  const hostBridge = new MockBridge((request) => response(request, 'host'));
+  const guestBridge = new MockBridge((request) => response(request, 'guest'));
+  await hostBridge.start();
+  await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => {
+    bridges.closeAll();
+    await hostBridge.stop();
+    await guestBridge.stop();
+  });
+
+  assert.deepEqual(await ssDump(bridges, 'guest', 'streams'), table);
+  assert.deepEqual(await ssAct(bridges, 'host', 'streamadd'), { invoked: true, month: 4 });
+  assert.deepEqual(await ssAct(bridges, 'host', 'streamdespawn'), { started: 1 });
+  for (const verb of ['streamadd', 'streamdespawn']) {
+    await assert.rejects(() => ssAct(bridges, 'guest', verb), /host-only/);
+    await assert.rejects(() => ssDump(bridges, 'host', verb), /unknown query verb/);
+  }
+  await assert.rejects(() => ssAct(bridges, 'host', 'streams'), /unknown action verb/);
+});
+
+test('wreck query and native test actions preserve arguments and refuse the wrong tool class', async (t) => {
+  const table = { campaignTimestamp: 123, count: 1, candidateCount: 1, truncated: false,
+    wrecks: { 'wreck:a': { managed: true, engineId: 'native-7', salvageSeed: '-9223372036854775808' } } };
+  const hostBridge = new MockBridge((request) => {
+    if (request.cmd === 'wrecks') return { ok: true, data: table };
+    return { ok: true, data: { command: request.cmd, args: request.args } };
+  });
+  const guestBridge = new MockBridge((request) => request.cmd === 'wreckspawn'
+    ? { ok: false, error: 'IllegalStateException: wreckspawn is host-only' }
+    : { ok: true, data: { command: request.cmd, args: request.args } });
+  await hostBridge.start();
+  await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => {
+    bridges.closeAll();
+    await hostBridge.stop();
+    await guestBridge.stop();
+  });
+  assert.deepEqual(await ssDump(bridges, 'host', 'wrecks'), table);
+  assert.deepEqual(await ssAct(bridges, 'host', 'wreckspawn', { anchor: 'guest' }),
+    { command: 'wreckspawn', args: { anchor: 'guest' } });
+  assert.deepEqual(await ssAct(bridges, 'guest', 'wreckconsume', { wreckId: 'wreck:a' }),
+    { command: 'wreckconsume', args: { wreckId: 'wreck:a' } });
+  await assert.rejects(() => ssAct(bridges, 'guest', 'wreckspawn'), /host-only/);
+  await assert.rejects(() => ssAct(bridges, 'host', 'wrecks'), /unknown action verb/);
+  for (const action of ['wreckspawn', 'wreckconsume']) {
+    await assert.rejects(() => ssDump(bridges, 'guest', action), /unknown query verb/);
+  }
+});
+
+test('stream diffs require timestamp pairing even if a tolerance or ignore list would hide it', async (t) => {
+  const hostBridge = new MockBridge(() => ({ ok: true, data: {
+    campaignTimestamp: 123, count: 0, streams: {}
+  } }));
+  let guestTimestamp = 124;
+  const guestBridge = new MockBridge(() => ({ ok: true, data: {
+    campaignTimestamp: guestTimestamp, count: 0, streams: {}
+  } }));
+  await hostBridge.start();
+  await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => {
+    bridges.closeAll();
+    await hostBridge.stop();
+    await guestBridge.stop();
+  });
+
+  await assert.rejects(() => ssDiff(bridges, 'streams', {}, {
+    tolerance: 100, ignore: ['campaignTimestamp']
+  }), /unmatched campaign timestamps.*shared pause/);
+  guestTimestamp = undefined;
+  await assert.rejects(() => ssDiff(bridges, 'streams'), /unmatched campaign timestamps/);
+  guestTimestamp = 123;
+  assert.equal((await ssDiff(bridges, 'streams')).equal, true);
+});
+
+test('paired stream diffs retain canonical identity, geometry and zero-brightness gap differences', async (t) => {
+  const host = { campaignTimestamp: 123, count: 1, streams: { 'host-7': {
+    id: 'host-7', kind: 'SEASONAL', segmentCount: 3, params: { burnLevel: 30 },
+    segments: [{ x: 0, y: 0, width: 600, bMult: 0.5 }],
+    brightness: [{ distance: 0, brightness: 0.35 }, { distance: 1000, brightness: 0 }]
+  } } };
+  const guest = structuredClone(host);
+  guest.streams['host-7'].brightness[0].brightness = 0.38;
+  guest.streams['host-7'].brightness[1].brightness = 0.08;
+  guest.streams['host-7'].segments[0].width = 650;
+  const hostBridge = new MockBridge(() => ({ ok: true, data: host }));
+  const guestBridge = new MockBridge(() => ({ ok: true, data: guest }));
+  await hostBridge.start();
+  await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => {
+    bridges.closeAll();
+    await hostBridge.stop();
+    await guestBridge.stop();
+  });
+
+  const compared = await ssDiff(bridges, 'streams', {}, { tolerance: 0.05 });
+  assert.equal(compared.equal, false);
+  assert.equal(compared.differences.length, 2);
+  assert.ok(compared.differences.some((entry) => entry.path.includes('host-7') && entry.path.endsWith('.width')));
+  assert.ok(compared.differences.some((entry) => entry.host === 0 && entry.guest === 0.08));
 });
 
 test('reuses one connection across sequential requests', async (t) => {
@@ -413,6 +1129,32 @@ test('counts report leaf values per side', () => {
 // --------------------------------------------------------------------------
 // Ignored keys
 // --------------------------------------------------------------------------
+
+test('entity and screen diffs ignore native references while rejecting changed canonical references', async (t) => {
+  const hostEntities = { entities: [{ id: 'coopenc_same_system1', engineId: 'host-body',
+    orbitFocus: 'coopenc_same_system0', orbitFocusEngineId: 'host-center' }] };
+  const guestEntities = { entities: [{ id: 'coopenc_same_system1', engineId: 'guest-body',
+    orbitFocus: 'coopenc_same_system0', orbitFocusEngineId: 'guest-center' }] };
+  const hostScreen = { interactionTargetId: 'coopenc_same_system1', interactionTargetEngineId: 'host-body' };
+  const guestScreen = { interactionTargetId: 'coopenc_same_system1', interactionTargetEngineId: 'guest-body' };
+  const hostBridge = new MockBridge((request) => ({ ok: true, data: request.cmd === 'entities' ? hostEntities : hostScreen }));
+  const guestBridge = new MockBridge((request) => ({ ok: true, data: request.cmd === 'entities' ? guestEntities : guestScreen }));
+  await hostBridge.start(); await guestBridge.start();
+  const bridges = bridgesFor(hostBridge.port, guestBridge.port);
+  t.after(async () => { bridges.closeAll(); await hostBridge.stop(); await guestBridge.stop(); });
+  assert.equal((await ssDiff(bridges, 'entities')).equal, true);
+  assert.equal((await ssDiff(bridges, 'screen')).equal, true);
+  guestEntities.entities[0].orbitFocus = 'coopenc_same_system2';
+  const focusDiff = await ssDiff(bridges, 'entities');
+  assert.equal(focusDiff.equal, false);
+  assert.deepEqual(focusDiff.differences, [{ path: '$.entities[id=coopenc_same_system1].orbitFocus',
+    host: 'coopenc_same_system0', guest: 'coopenc_same_system2' }]);
+  guestScreen.interactionTargetId = 'coopenc_same_system2';
+  const targetDiff = await ssDiff(bridges, 'screen');
+  assert.equal(targetDiff.equal, false);
+  assert.deepEqual(targetDiff.differences, [{ path: '$.interactionTargetId',
+    host: 'coopenc_same_system1', guest: 'coopenc_same_system2' }]);
+});
 
 // The three payload shapes the live run tripped over. Everything here is per-instance except the
 // coopFleetId keys and the visibility view, which is the point: with the default ignore list these
@@ -1415,6 +2157,133 @@ test('refuses the non-verbs with the reason, and unknown verbs with the verb lis
   await assert.rejects(() => ssDump(bridges, 'host', 'teleport', {}), /unknown query verb "teleport".*status, fleets/s);
   await assert.rejects(() => ssAct(bridges, 'host', 'fleets', {}), /unknown action verb "fleets".*teleport, pause/s);
   bridges.closeAll();
+});
+
+function clockAlignmentFixture({ hostTimestamp = -55_644_500_923_000,
+  guestTimestamp = -55_644_499_345_400, onStatus, onAlign } = {}) {
+  const statuses = { host: statusFor('HOST', { ...HOST_PAUSE }), guest: statusFor('GUEST', {}) };
+  statuses.host.clock.timestamp = hostTimestamp;
+  statuses.guest.clock.timestamp = guestTimestamp;
+  const requests = [];
+  const reads = { host: 0, guest: 0 };
+  const bridges = { get(instance) {
+    return { async send(cmd, args) {
+      requests.push({ instance, cmd, args });
+      if (cmd === 'status') {
+        onStatus?.(instance, ++reads[instance], statuses);
+        return structuredClone(statuses[instance]);
+      }
+      if (cmd === 'clockalign') {
+        const beforeTimestamp = statuses[instance].clock.timestamp;
+        if (onAlign) onAlign(instance, args, statuses);
+        else statuses[instance].clock.timestamp = args.targetTimestamp;
+        return { beforeTimestamp, afterTimestamp: statuses[instance].clock.timestamp,
+          advanced: beforeTimestamp !== statuses[instance].clock.timestamp };
+      }
+      throw new Error(`unexpected clock alignment command ${cmd}`);
+    } };
+  } };
+  return { bridges, statuses, requests };
+}
+
+test('ss_align_clocks advances only the lower clock to max, including negative timestamps and either role', async () => {
+  for (const lower of ['host', 'guest']) {
+    const low = -55_644_500_923_000;
+    const high = -55_644_499_345_400;
+    const fixture = clockAlignmentFixture({ hostTimestamp: lower === 'host' ? low : high,
+      guestTimestamp: lower === 'guest' ? low : high });
+    const result = await ssAlignClocks(fixture.bridges);
+    assert.equal(result.sessionId, 's-1');
+    assert.equal(result.targetTimestamp, high);
+    assert.equal(result.alignedInstance, lower);
+    assert.equal(result.advanced, true);
+    assert.deepEqual(result.after, { host: high, guest: high });
+    assert.deepEqual(fixture.requests.filter((request) => request.cmd !== 'status'),
+      [{ instance: lower, cmd: 'clockalign', args: { targetTimestamp: high } }]);
+    assert.equal(fixture.requests.filter((request) => request.cmd === 'status').length, 4,
+      'both statuses are read before and after the single action');
+  }
+});
+
+test('ss_align_clocks equal timestamps are a no-op with fresh two-instance verification', async () => {
+  const timestamp = -55_644_499_345_400;
+  const fixture = clockAlignmentFixture({ hostTimestamp: timestamp, guestTimestamp: timestamp });
+  const result = await ssAlignClocks(fixture.bridges);
+  assert.equal(result.alignedInstance, null);
+  assert.equal(result.advanced, false);
+  assert.deepEqual(result.before, result.after);
+  assert.equal(fixture.requests.length, 4);
+  assert.ok(fixture.requests.every((request) => request.cmd === 'status'));
+});
+
+test('ss_align_clocks refuses foreign or inactive sessions, wrong roles, unsafe clocks and missing shared pause before writes', async () => {
+  const cases = [
+    [(s) => { s.host.role = 'GUEST'; }, /host role HOST/],
+    [(s) => { s.guest.role = 'HOST'; }, /guest role GUEST/],
+    [(s) => { s.host.sessionActive = false; }, /active session/],
+    [(s) => { s.guest.sessionActive = false; }, /active session/],
+    [(s) => { s.guest.sessionId = 'foreign-session'; }, /same nonempty sessionId/],
+    [(s) => { s.host.sessionId = s.guest.sessionId = ''; }, /same nonempty sessionId/],
+    [(s) => { s.host.sessionId = s.guest.sessionId = '  '; }, /same nonempty sessionId/],
+    [(s) => { s.host.sessionId = s.guest.sessionId = 17; }, /same nonempty sessionId/],
+    [(s) => { delete s.host.sessionId; delete s.guest.sessionId; }, /same nonempty sessionId/],
+    [(s) => { s.host.paused = false; }, /both campaigns paused/],
+    [(s) => { s.guest.paused = false; }, /both campaigns paused/],
+    [(s) => { s.host.pause.effective = false; }, /shared pause effective/],
+    [(s) => { delete s.host.pause; }, /shared pause effective/],
+    [(s) => { s.host.clock.timestamp = Number.MAX_SAFE_INTEGER + 1; }, /safe integer/],
+    [(s) => { s.guest.clock.timestamp = 1.5; }, /safe integer/],
+    [(s) => { s.host.clock.timestamp = '123'; }, /safe integer/],
+    [(s) => { delete s.guest.clock.timestamp; }, /safe integer/]
+  ];
+  for (const [change, error] of cases) {
+    const fixture = clockAlignmentFixture();
+    change(fixture.statuses);
+    await assert.rejects(() => ssAlignClocks(fixture.bridges), error);
+    assert.ok(fixture.requests.every((request) => request.cmd === 'status'), 'a refused pair cannot write');
+  }
+});
+
+test('ss_align_clocks accepts a one-day gap and refuses a larger gap without advancing', async () => {
+  const allowed = clockAlignmentFixture({ hostTimestamp: -MS_PER_GAME_DAY, guestTimestamp: 0 });
+  assert.equal((await ssAlignClocks(allowed.bridges)).after.host, 0);
+  const oversized = clockAlignmentFixture({ hostTimestamp: -MS_PER_GAME_DAY - 1, guestTimestamp: 0 });
+  await assert.rejects(() => ssAlignClocks(oversized.bridges), /exceeds one game day/);
+  assert.ok(oversized.requests.every((request) => request.cmd === 'status'));
+});
+
+test('ss_align_clocks rejects readback drift, changed sessions or a released pause after the action', async () => {
+  const cases = [
+    [(s) => { s.host.clock.timestamp++; }, /readback differs from target/],
+    [(s) => { s.host.clock.timestamp++; s.guest.clock.timestamp++; }, /readback differs from target/],
+    [(s) => { s.guest.sessionId = 'foreign-session'; }, /same nonempty sessionId/],
+    [(s) => { s.host.sessionId = s.guest.sessionId = 'new-session'; }, /same nonempty sessionId/],
+    [(s) => { s.host.sessionActive = false; }, /active session/],
+    [(s) => { s.guest.role = 'NONE'; }, /guest role GUEST/],
+    [(s) => { s.host.paused = false; }, /both campaigns paused/],
+    [(s) => { s.guest.paused = false; }, /both campaigns paused/],
+    [(s) => { s.host.pause.effective = false; }, /shared pause effective/]
+  ];
+  for (const [change, error] of cases) {
+    const fixture = clockAlignmentFixture({ onStatus(instance, count, statuses) {
+      if (instance === 'host' && count === 2) change(statuses);
+    } });
+    await assert.rejects(() => ssAlignClocks(fixture.bridges), error);
+    assert.equal(fixture.requests.filter((request) => request.cmd === 'clockalign').length, 1);
+  }
+  const ignored = clockAlignmentFixture({ onAlign() {} });
+  await assert.rejects(() => ssAlignClocks(ignored.bridges), /readback differs from target/);
+});
+
+test('clockalign stays an action verb even when the target would be a no-op', async () => {
+  const fixture = clockAlignmentFixture();
+  assert.ok(ACTION_VERBS.includes('clockalign'));
+  assert.ok(!QUERY_VERBS.includes('clockalign'));
+  assert.ok(!READ_ONLY_COMMANDS.has('clockalign'));
+  const result = await ssAct(fixture.bridges, 'host', 'clockalign',
+    { targetTimestamp: fixture.statuses.host.clock.timestamp });
+  assert.equal(result.advanced, false);
+  await assert.rejects(() => ssDump(fixture.bridges, 'host', 'clockalign'), /unknown query verb/);
 });
 
 test('ss_advance_days unpauses, waits out the clock, and pauses again', async (t) => {

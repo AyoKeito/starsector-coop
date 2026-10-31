@@ -1,6 +1,7 @@
 package coop.campaign;
 
 import com.fs.starfarer.api.campaign.LocationAPI;
+import com.fs.starfarer.api.campaign.StarSystemAPI;
 import coop.testing.ProxyDefaults;
 import org.junit.jupiter.api.Test;
 
@@ -45,6 +46,23 @@ class CoopCampaignReplicatorOrbitSyncTest {
         assertSame(MAGEC, locations.get(1));
     }
 
+    @Test
+    void twoDeepSpaceSystemsAreBothSelectedForOrbitSnapshots() {
+        StarSystemAPI gateHauler = starSystem("deep space", null);
+        StarSystemAPI namelessRock = starSystem("deep space", "nameless_rock_location");
+
+        assertEquals(List.of(gateHauler, namelessRock),
+                CoopCampaignReplicator.orbitSyncLocations(gateHauler, namelessRock));
+    }
+
+    @Test
+    void twoHandlesWithTheSameUniqueSystemKeyAreSnapshotOnce() {
+        StarSystemAPI first = starSystem("deep space", "nameless_rock_location");
+        StarSystemAPI second = starSystem("deep space", "nameless_rock_location");
+
+        assertEquals(List.of(first), CoopCampaignReplicator.orbitSyncLocations(first, second));
+    }
+
     /** Two references to the same system must not produce two snapshots of it. */
     @Test
     void theSameSystemReachedThroughTwoReferencesIsStillOneLocation() {
@@ -66,6 +84,17 @@ class CoopCampaignReplicatorOrbitSyncTest {
         assertEquals(List.of(CORVUS), CoopCampaignReplicator.orbitSyncLocations(CORVUS, null));
         assertEquals(List.of(MAGEC), CoopCampaignReplicator.orbitSyncLocations(null, MAGEC));
         assertTrue(CoopCampaignReplicator.orbitSyncLocations(null, null).isEmpty());
+    }
+
+    private static StarSystemAPI starSystem(String id, String uniqueId) {
+        return (StarSystemAPI) Proxy.newProxyInstance(StarSystemAPI.class.getClassLoader(),
+                new Class<?>[]{StarSystemAPI.class}, (proxy, method, args) -> switch (method.getName()) {
+                    case "getId" -> id;
+                    case "getOptionalUniqueId" -> uniqueId;
+                    case "equals" -> proxy == args[0];
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    default -> ProxyDefaults.defaultValue(method.getReturnType());
+                });
     }
 
     private static LocationAPI location(String id, boolean hyperspace) {

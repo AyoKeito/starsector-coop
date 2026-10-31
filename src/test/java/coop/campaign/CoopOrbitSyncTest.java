@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class CoopOrbitSyncTest {
 
@@ -75,5 +76,32 @@ class CoopOrbitSyncTest {
                 CoopMessages.requiredPayloadString(decoded, "orbits"));
         assertEquals(1, back.size());
         assertEquals(136.63f, back.get(0).angle());
+    }
+
+    @Test void optionalGhostPoseRoundTripsAlongsideUnchangedFiveColumnEntries() {
+        CoopOrbitSync.OrbitEntry ordinary = new CoopOrbitSync.OrbitEntry("jangala", "corvus", 4500, 200, 136.63f);
+        assertEquals("jangala|corvus|4500.0|200.0|136.63", CoopOrbitSync.encode(List.of(ordinary)));
+        CoopOrbitSync.OrbitEntry ghost = new CoopOrbitSync.OrbitEntry("coopenc_alpha_system4", "coopenc_alpha_system3",
+                352.4f, 29.6f, 289.36f, new CoopOrbitSync.Pose(492.1f, -757.3f, 7, -3, 150));
+        List<CoopOrbitSync.OrbitEntry> entries = List.of(ordinary, ghost);
+        assertEquals(entries, CoopOrbitSync.decode(CoopOrbitSync.encode(entries)));
+        String encoded = CoopMessages.requiredPayloadString(CoopMessages.decode(CoopMessages.encode(
+                CoopMessages.orbitSnapshot("s1", 1, 10, "alpha", CoopOrbitSync.encode(entries)))), "orbits");
+        assertEquals(entries, CoopOrbitSync.decode(encoded));
+        assertNull(CoopOrbitSync.decode("jangala|corvus|4500|200|136.63").get(0).pose());
+    }
+
+    @Test void ghostPoseRejectsPartialNonfiniteOutOfRangeAndNonEncounterValues() {
+        String prefix = "coopenc_alpha_system4|coopenc_alpha_system3|352|29|289";
+        for (String suffix : List.of("|1", "|1|2", "|1|2|3", "|1|2|3|4", "|1|2|3|4|5|6", "|NaN|2|3|4|5",
+                "|1|Infinity|3|4|5", "|1000001|2|3|4|5", "|1|-1000001|3|4|5", "|1|2|100001|4|5", "|1|2|3|-100001|5",
+                "|1|2|3|4|NaN", "|1|2|3|4|1000001")) {
+            assertThrows(IllegalArgumentException.class, () -> CoopOrbitSync.decode(prefix + suffix), suffix);
+        }
+        assertThrows(IllegalArgumentException.class, () -> CoopOrbitSync.decode("ordinary|focus|1|2|3|1|2|3|4|5"));
+        assertThrows(IllegalArgumentException.class, () -> new CoopOrbitSync.Pose(0, 0, Float.NaN, 0, 0));
+        CoopOrbitSync.Pose bounds = new CoopOrbitSync.Pose(-1_000_000, 1_000_000, -100_000, 100_000, 1_000_000);
+        CoopOrbitSync.OrbitEntry ghost = new CoopOrbitSync.OrbitEntry("coopenc_alpha_system4", null, 1, 2, 3, bounds);
+        assertEquals(ghost, CoopOrbitSync.decode(CoopOrbitSync.encode(List.of(ghost))).get(0));
     }
 }

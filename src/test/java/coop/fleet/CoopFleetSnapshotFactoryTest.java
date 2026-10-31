@@ -2,10 +2,13 @@ package coop.fleet;
 
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.SettingsAPI;
+import com.fs.starfarer.api.campaign.CampaignFleetAPI;
+import com.fs.starfarer.api.campaign.StarSystemAPI;
 import com.fs.starfarer.api.combat.ShipHullSpecAPI;
 import com.fs.starfarer.api.combat.ShipVariantAPI;
 import com.fs.starfarer.api.impl.campaign.ids.Tags;
 import com.fs.starfarer.api.loading.HullModSpecAPI;
+import coop.testing.ProxyDefaults;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
@@ -25,6 +28,27 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * roster capture must degrade one ship at a time, never truncate.
  */
 class CoopFleetSnapshotFactoryTest {
+
+    @Test
+    void playerSnapshotCarriesTheNamelessRockUniqueLocationKey() {
+        StarSystemAPI namelessRock = (StarSystemAPI) Proxy.newProxyInstance(
+                StarSystemAPI.class.getClassLoader(), new Class<?>[]{StarSystemAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getId" -> "deep space";
+                    case "getOptionalUniqueId" -> "nameless_rock_location";
+                    default -> ProxyDefaults.defaultValue(method.getReturnType());
+                });
+        CampaignFleetAPI fleet = (CampaignFleetAPI) Proxy.newProxyInstance(
+                CampaignFleetAPI.class.getClassLoader(), new Class<?>[]{CampaignFleetAPI.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getContainingLocation" -> namelessRock;
+                    default -> ProxyDefaults.defaultValue(method.getReturnType());
+                });
+
+        CoopFleetSnapshot snapshot = CoopFleetSnapshotFactory.capture(fleet, "guest", "Guest");
+
+        assertEquals("nameless_rock_location", snapshot.locationId());
+    }
 
     /** A roster where any slot can be made to throw, standing in for an engine {@code FleetMember}. */
     private static final class FakeSource implements CoopFleetSnapshotFactory.MemberSource {

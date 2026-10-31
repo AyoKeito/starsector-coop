@@ -195,11 +195,29 @@ class CoopAgentCommandsTest {
     void theLiveRegistryIsExactlyTheVersionOneCommandTable() {
         assertEquals(
                 java.util.Set.of("ability", "addship", "barpool", "cargo", "colonizable", "entities",
-                        "expedition", "feed", "fleets", "give", "hirable", "intel", "landmarks",
+                        "expedition", "feed", "fleets", "ghosts", "ghostspawn", "give", "hirable", "intel", "landmarks",
                         "mark", "market", "markets", "memory", "netfault", "objective", "ownfleet",
                         "pause", "rep", "save", "screen", "setcr", "status", "survey", "surveyset",
-                        "teleport", "visibility"),
+                        "teleport", "visibility", "streams", "storms", "streamadd", "streamdespawn", "clockalign",
+                        "wrecks", "wreckspawn", "wreckconsume", "encounters", "encounterspawn", "lights", "lightspawn",
+                        "lightgrantfault", "lightmessagehold", "course"),
                 new CoopAgentCommands().verbs());
+    }
+
+    @Test
+    void stormSelectorsFailBeforeAccessingTheLiveAdapter() throws JSONException {
+        var sector = coop.testing.ApiProxies.sectorWithMemory(coop.testing.ApiProxies.memory(new java.util.HashMap<>()));
+        CoopAgentCommands.Context context = new CoopAgentCommands.Context() {
+            public SectorAPI sector() { return sector; }
+            public CoopNetPump pump() { throw new AssertionError("invalid selector accessed the pump"); }
+        };
+        for (String args : java.util.List.of("{\"limit\":0}", "{\"limit\":129}", "{\"limit\":1.5}",
+                "{\"cells\":true}", "{\"cells\":\"-1,2\"}", "{\"cells\":\"1,2;\"}",
+                "{\"cells\":\"1,2;01,2\"}", "{\"cells\":\"2147483648,0\"}",
+                "{\"cells\":\"1,2;2,3\",\"limit\":1}", "{\"unexpected\":1}")) {
+            org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                    () -> CoopAgentCommands.storms(new JSONObject(args), context), args);
+        }
     }
 
     @Test
@@ -283,6 +301,31 @@ class CoopAgentCommandsTest {
         assertEquals("IllegalStateException: no campaign loaded", response.getString("error"),
                 "the verb must be wired; without a sector it refuses for the same reason every"
                         + " other verb does");
+    }
+
+    @Test
+    void m5NativeDiagnosticsAreRegisteredAndValidateArguments() throws JSONException {
+        CoopAgentCommands commands = new CoopAgentCommands();
+        for (String request : java.util.List.of(
+                "{\"id\":41,\"cmd\":\"ghosts\"}",
+                "{\"id\":42,\"cmd\":\"ghostspawn\",\"args\":{\"kind\":\"charger\"}}",
+                "{\"id\":46,\"cmd\":\"course\",\"args\":{\"x\":1,\"y\":2}}",
+                "{\"id\":47,\"cmd\":\"course\",\"args\":{\"clear\":true}}")) {
+            JSONObject response = new JSONObject(commands.dispatch(request, EMPTY_CONTEXT));
+            assertFalse(response.getBoolean("ok"));
+            assertEquals("IllegalStateException: no campaign loaded", response.getString("error"));
+        }
+        for (String request : java.util.List.of(
+                "{\"id\":43,\"cmd\":\"ghosts\",\"args\":{\"advance\":1}}",
+                "{\"id\":44,\"cmd\":\"ghostspawn\"}",
+                "{\"id\":45,\"cmd\":\"ghostspawn\",\"args\":{\"kind\":\"charger\",\"seed\":1}}",
+                "{\"id\":48,\"cmd\":\"course\",\"args\":{\"clear\":false}}",
+                "{\"id\":49,\"cmd\":\"course\",\"args\":{\"x\":1}}",
+                "{\"id\":50,\"cmd\":\"course\",\"args\":{\"x\":1,\"y\":2,\"clear\":true}}")) {
+            JSONObject response = new JSONObject(commands.dispatch(request, EMPTY_CONTEXT));
+            assertFalse(response.getBoolean("ok"));
+            assertTrue(response.getString("error").startsWith("IllegalArgumentException:"));
+        }
     }
 
     // ---- netfault --------------------------------------------------------------------------------

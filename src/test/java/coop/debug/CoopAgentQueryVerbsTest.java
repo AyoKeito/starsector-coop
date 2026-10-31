@@ -4,6 +4,7 @@ import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.SettingsAPI;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.CampaignUIAPI;
+import com.fs.starfarer.api.campaign.CharacterDataAPI;
 import com.fs.starfarer.api.campaign.CommDirectoryAPI;
 import com.fs.starfarer.api.campaign.CommDirectoryEntryAPI;
 import com.fs.starfarer.api.campaign.CoreUITabId;
@@ -28,6 +29,7 @@ import com.fs.starfarer.api.characters.PersonAPI;
 import com.fs.starfarer.api.characters.PersonalityAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.impl.campaign.ids.Ranks;
+import com.fs.starfarer.api.loading.AbilitySpecAPI;
 import coop.campaign.CoopCreditTransfer;
 import coop.fleet.CoopLocations;
 import coop.fleet.CoopMirrorTags;
@@ -45,6 +47,7 @@ import org.lwjgl.util.vector.Vector2f;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -128,6 +131,19 @@ class CoopAgentQueryVerbsTest {
     }
 
     @Test
+    void theNamelessRockUniqueIdResolvesBesideTheGateHaulerDeepSpaceId() {
+        StarSystemAPI gateHauler = proxy(StarSystemAPI.class, answers("getId", args -> "deep space"));
+        StarSystemAPI namelessRock = proxy(StarSystemAPI.class, answers(
+                "getId", args -> "deep space", "getOptionalUniqueId", args -> "nameless_rock_location"));
+        SectorAPI sector = proxy(SectorAPI.class, answers(
+                "getStarSystems", args -> List.of(gateHauler, namelessRock),
+                "getAllLocations", args -> List.of(gateHauler, namelessRock)));
+
+        assertSame(namelessRock, CoopAgentCommands.resolveSurveyScope(sector, "nameless_rock_location"));
+        assertSame(gateHauler, CoopAgentCommands.resolveSurveyScope(sector, "deep space"));
+    }
+
+    @Test
     void theOldNameLookupStaysAsTheFallback() {
         StarSystemAPI system = proxy(StarSystemAPI.class, answers("getId", args -> "system_04ab"));
         SectorAPI sector = proxy(SectorAPI.class, answers(
@@ -154,10 +170,11 @@ class CoopAgentQueryVerbsTest {
     void abilityWithNoArgumentIsStillThePlainToolbarPress() throws JSONException {
         FakeAbility ability = new FakeAbility(true);
 
-        CoopAgentCommands.ability(args("abilityId", "transponder"), abilityContext(ability));
+        JSONObject response = CoopAgentCommands.ability(args("abilityId", "transponder"), abilityContext(ability));
 
         assertEquals(1, ability.activateCalls, "no \"on\" argument means press the button, as before");
         assertEquals(0, ability.deactivateCalls);
+        assertFalse(response.has("grantedMissing"), "the default response contract stays unchanged");
     }
 
     @Test
@@ -200,6 +217,278 @@ class CoopAgentQueryVerbsTest {
         CoopAgentCommands.ability(offByWord, abilityContext(ability));
 
         assertEquals(1, ability.deactivateCalls);
+    }
+
+    @Test
+    void aMissingAbilityIsStillRefusedUnlessGrantIsExplicitlyTrue() throws JSONException {
+        FakeAbilityFleet fleet = new FakeAbilityFleet(null, new FakeAbility(false).proxy());
+        JSONObject request = args("abilityId", "generate_slipsurge");
+
+        IllegalArgumentException absent = assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.ability(request, fleet.context()));
+        assertEquals("player fleet has no ability generate_slipsurge", absent.getMessage());
+        request.put("grantMissing", false);
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.ability(request, fleet.context()));
+        assertEquals(0, fleet.addCalls);
+        assertNull(fleet.plugin);
+    }
+
+    @Test
+    void anExplicitGrantObtainsTheNativePluginAndCanLeaveItInactive() throws JSONException {
+        FakeAbility nativeAbility = new FakeAbility(false);
+        AbilityPlugin nativePlugin = nativeAbility.proxy();
+        FakeAbilityFleet fleet = new FakeAbilityFleet(null, nativePlugin);
+        List<String> order = fleet.calls;
+        Global.setSettings(proxy(SettingsAPI.class, answers("getAbilitySpec", arguments -> {
+            order.add("spec:" + arguments[0]);
+            return proxy(AbilitySpecAPI.class, answers("getId", ignored -> "generate_slipsurge"));
+        })));
+        JSONObject request = args("abilityId", "generate_slipsurge");
+        request.put("grantMissing", true);
+        request.put("on", false);
+
+        JSONObject response = CoopAgentCommands.ability(request, fleet.context());
+
+        assertEquals(List.of("get:generate_slipsurge", "spec:generate_slipsurge",
+                "character-add:generate_slipsurge", "add:generate_slipsurge", "get:generate_slipsurge"), order);
+        assertSame(nativePlugin, fleet.plugin);
+        assertEquals(Set.of("generate_slipsurge"), fleet.known);
+        assertEquals(1, fleet.characterAddCalls);
+        assertTrue(response.getBoolean("grantedMissing"));
+        assertFalse(response.getBoolean("active"));
+        assertFalse(response.getBoolean("activeOrInProgress"));
+        assertEquals(0, nativeAbility.activateCalls);
+        assertEquals(0, nativeAbility.deactivateCalls);
+
+        JSONObject repeated = CoopAgentCommands.ability(request, fleet.context());
+        assertFalse(repeated.getBoolean("grantedMissing"));
+        assertEquals(1, fleet.addCalls, "a repeated setup request must retain the first native plugin");
+        assertEquals(1, fleet.characterAddCalls);
+        assertSame(nativePlugin, fleet.plugin);
+    }
+
+    @Test
+    void aGrantedAbilitySurvivesNativeReconciliationBeforeTheNextBridgeRequest() throws JSONException {
+        FakeAbility nativeAbility = new FakeAbility(false);
+        AbilityPlugin nativePlugin = nativeAbility.proxy();
+        FakeAbilityFleet fleet = new FakeAbilityFleet(null, nativePlugin);
+        Global.setSettings(proxy(SettingsAPI.class, answers("getAbilitySpec", arguments ->
+                proxy(AbilitySpecAPI.class, answers("getId", ignored -> "generate_slipsurge")))));
+        JSONObject grant = args("abilityId", "generate_slipsurge");
+        grant.put("grantMissing", true);
+        grant.put("on", false);
+        CoopAgentCommands.ability(grant, fleet.context());
+
+        fleet.reconcileAbilities();
+        JSONObject activate = args("abilityId", "generate_slipsurge");
+        activate.put("on", true);
+        JSONObject response = CoopAgentCommands.ability(activate, fleet.context());
+
+        assertSame(nativePlugin, fleet.plugin);
+        assertTrue(response.getBoolean("activeOrInProgress"));
+        assertFalse(response.has("grantedMissing"));
+        assertEquals(1, nativeAbility.activateCalls);
+        assertEquals(1, fleet.characterAddCalls);
+        assertEquals(1, fleet.addCalls);
+    }
+
+    @Test
+    void aFleetOnlyAbilityGainsCharacterOwnershipWithoutReplacingItsPlugin() throws JSONException {
+        FakeAbility nativeAbility = new FakeAbility(true);
+        AbilityPlugin nativePlugin = nativeAbility.proxy();
+        FakeAbilityFleet fleet = new FakeAbilityFleet(nativePlugin, new FakeAbility(false).proxy());
+        fleet.known.clear();
+        Global.setSettings(proxy(SettingsAPI.class, answers("getAbilitySpec", arguments ->
+                proxy(AbilitySpecAPI.class, answers("getId", ignored -> "generate_slipsurge")))));
+        JSONObject grant = args("abilityId", "generate_slipsurge");
+        grant.put("grantMissing", true);
+        grant.put("on", true);
+
+        JSONObject response = CoopAgentCommands.ability(grant, fleet.context());
+        fleet.reconcileAbilities();
+
+        assertTrue(response.getBoolean("grantedMissing"));
+        assertEquals(Set.of("generate_slipsurge"), fleet.known);
+        assertEquals(1, fleet.characterAddCalls);
+        assertSame(nativePlugin, fleet.plugin);
+        assertTrue(nativeAbility.active);
+        assertEquals(0, nativeAbility.activateCalls);
+        assertEquals(0, nativeAbility.deactivateCalls);
+    }
+
+    @Test
+    void aKnownAbilityWithAMissingFleetPluginRepairsOnlyThePlugin() throws JSONException {
+        FakeAbility nativeAbility = new FakeAbility(false);
+        FakeAbilityFleet fleet = new FakeAbilityFleet(null, nativeAbility.proxy());
+        fleet.known.add("generate_slipsurge");
+        Global.setSettings(proxy(SettingsAPI.class, answers("getAbilitySpec", arguments ->
+                proxy(AbilitySpecAPI.class, answers("getId", ignored -> "generate_slipsurge")))));
+        JSONObject grant = args("abilityId", "generate_slipsurge");
+        grant.put("grantMissing", true);
+        grant.put("on", false);
+
+        JSONObject response = CoopAgentCommands.ability(grant, fleet.context());
+
+        assertTrue(response.getBoolean("grantedMissing"));
+        assertEquals(0, fleet.characterAddCalls);
+        assertEquals(1, fleet.addCalls);
+        assertFalse(nativeAbility.active);
+    }
+
+    @Test
+    void anExistingAbilityIsNeverReaddedOrSpecResolvedByTheGrantOption() throws JSONException {
+        FakeAbility nativeAbility = new FakeAbility(true);
+        AbilityPlugin nativePlugin = nativeAbility.proxy();
+        FakeAbilityFleet fleet = new FakeAbilityFleet(nativePlugin, new FakeAbility(false).proxy());
+        Global.setSettings(proxy(SettingsAPI.class, answers("getAbilitySpec", arguments -> {
+            throw new AssertionError("an existing native plugin must not be re-resolved");
+        })));
+        JSONObject request = args("abilityId", "generate_slipsurge");
+        request.put("grantMissing", true);
+        request.put("on", true);
+
+        JSONObject response = CoopAgentCommands.ability(request, fleet.context());
+
+        assertFalse(response.getBoolean("grantedMissing"));
+        assertSame(nativePlugin, fleet.plugin);
+        assertTrue(nativeAbility.active);
+        assertEquals(0, fleet.addCalls);
+        assertEquals(0, fleet.characterAddCalls);
+        assertEquals(0, nativeAbility.activateCalls);
+        assertEquals(0, nativeAbility.deactivateCalls);
+    }
+
+    @Test
+    void aGrantedAbilityStillUsesTheNativeToolbarActivation() throws JSONException {
+        FakeAbility nativeAbility = new FakeAbility(false);
+        FakeAbilityFleet fleet = new FakeAbilityFleet(null, nativeAbility.proxy());
+        Global.setSettings(proxy(SettingsAPI.class, answers("getAbilitySpec", arguments ->
+                proxy(AbilitySpecAPI.class, answers("getId", ignored -> "generate_slipsurge")))));
+        JSONObject request = args("abilityId", "generate_slipsurge");
+        request.put("grantMissing", true);
+
+        JSONObject response = CoopAgentCommands.ability(request, fleet.context());
+
+        assertTrue(response.getBoolean("grantedMissing"));
+        assertTrue(response.getBoolean("active"));
+        assertEquals(1, nativeAbility.activateCalls);
+        assertEquals(0, nativeAbility.deactivateCalls);
+    }
+
+    @Test
+    void aGrantRequiresSettingsBeforeFleetMutation() throws JSONException {
+        FakeAbilityFleet fleet = new FakeAbilityFleet(null, new FakeAbility(false).proxy());
+        Global.setSettings(null);
+        JSONObject request = args("abilityId", "generate_slipsurge");
+        request.put("grantMissing", true);
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> CoopAgentCommands.ability(request, fleet.context()));
+
+        assertEquals("ability grant requires game settings", error.getMessage());
+        assertEquals(0, fleet.addCalls);
+    }
+
+    @Test
+    void anUnknownAbilitySpecIsRefusedBeforeFleetMutation() throws JSONException {
+        FakeAbilityFleet fleet = new FakeAbilityFleet(null, new FakeAbility(false).proxy());
+        Global.setSettings(proxy(SettingsAPI.class, answers("getAbilitySpec", arguments -> null)));
+        JSONObject request = args("abilityId", "unknown_native_ability");
+        request.put("grantMissing", true);
+
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.ability(request, fleet.context()));
+
+        assertEquals("no ability spec unknown_native_ability", error.getMessage());
+        assertEquals(0, fleet.addCalls);
+        assertEquals(0, fleet.characterAddCalls);
+        assertNull(fleet.plugin);
+    }
+
+    @Test
+    void aThrowingNativeSpecLookupIsRefusedBeforeFleetMutation() throws JSONException {
+        FakeAbilityFleet fleet = new FakeAbilityFleet(null, new FakeAbility(false).proxy());
+        Global.setSettings(proxy(SettingsAPI.class, answers("getAbilitySpec", arguments -> {
+            throw new IllegalArgumentException("unknown native ability spec");
+        })));
+        JSONObject request = args("abilityId", "unknown_native_ability");
+        request.put("grantMissing", true);
+
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.ability(request, fleet.context()));
+
+        assertEquals(0, fleet.addCalls);
+        assertEquals(0, fleet.characterAddCalls);
+        assertNull(fleet.plugin);
+    }
+
+    @Test
+    void aGrantRequiresReadableCharacterOwnershipBeforeMutation() throws JSONException {
+        for (boolean missingCharacter : List.of(true, false)) {
+            FakeAbilityFleet fleet = new FakeAbilityFleet(null, new FakeAbility(false).proxy());
+            fleet.characterMissing = missingCharacter;
+            fleet.ownershipUnreadable = !missingCharacter;
+            JSONObject request = args("abilityId", "generate_slipsurge");
+            request.put("grantMissing", true);
+
+            IllegalStateException error = assertThrows(IllegalStateException.class,
+                    () -> CoopAgentCommands.ability(request, fleet.context()));
+
+            assertEquals("ability grant requires the character ability list", error.getMessage());
+            assertEquals(0, fleet.addCalls);
+            assertEquals(0, fleet.characterAddCalls);
+        }
+    }
+
+    @Test
+    void aGrantThatDoesNotPersistCharacterOwnershipFailsLoudlyBeforeActivation() throws JSONException {
+        FakeAbility nativeAbility = new FakeAbility(false);
+        FakeAbilityFleet fleet = new FakeAbilityFleet(null, nativeAbility.proxy());
+        fleet.rejectCharacterGrant = true;
+        Global.setSettings(proxy(SettingsAPI.class, answers("getAbilitySpec", arguments ->
+                proxy(AbilitySpecAPI.class, answers("getId", ignored -> "generate_slipsurge")))));
+        JSONObject request = args("abilityId", "generate_slipsurge");
+        request.put("grantMissing", true);
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> CoopAgentCommands.ability(request, fleet.context()));
+
+        assertEquals("character did not acquire ability generate_slipsurge", error.getMessage());
+        assertEquals(1, fleet.characterAddCalls);
+        assertEquals(0, nativeAbility.activateCalls);
+        assertEquals(0, fleet.addCalls);
+    }
+
+    @Test
+    void aGrantThatDoesNotProduceANativePluginFailsLoudly() throws JSONException {
+        FakeAbilityFleet fleet = new FakeAbilityFleet(null, null);
+        Global.setSettings(proxy(SettingsAPI.class, answers("getAbilitySpec", arguments ->
+                proxy(AbilitySpecAPI.class, answers("getId", ignored -> "generate_slipsurge")))));
+        JSONObject request = args("abilityId", "generate_slipsurge");
+        request.put("grantMissing", true);
+        request.put("on", false);
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> CoopAgentCommands.ability(request, fleet.context()));
+
+        assertEquals("player fleet did not acquire ability generate_slipsurge", error.getMessage());
+        assertEquals(1, fleet.addCalls);
+        assertNull(fleet.plugin);
+    }
+
+    @Test
+    void aMalformedGrantOrStateIsRefusedBeforeInstallingAnAbility() throws JSONException {
+        FakeAbilityFleet fleet = new FakeAbilityFleet(null, new FakeAbility(false).proxy());
+        JSONObject request = args("abilityId", "generate_slipsurge");
+        request.put("grantMissing", "true");
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.ability(request, fleet.context()));
+        request.put("grantMissing", true);
+        request.put("on", "not-a-state");
+        assertThrows(IllegalArgumentException.class,
+                () -> CoopAgentCommands.ability(request, fleet.context()));
+        assertEquals(0, fleet.addCalls);
     }
 
     // ---- status: the pause block ----------------------------------------------------------------
@@ -1746,6 +2035,9 @@ class CoopAgentQueryVerbsTest {
             answers.put("getId", args -> id);
             answers.put("getName", args -> id);
             answers.put("getEntityById", args -> entityIn(id, String.valueOf(args[0])));
+            answers.put("getAllEntities", args -> entitiesById.entrySet().stream()
+                    .filter(entry -> id.equals(locationOfEntity.get(entry.getKey())))
+                    .map(Map.Entry::getValue).toList());
             answers.put("createToken",
                     args -> token(id, ((Number) args[0]).floatValue(), ((Number) args[1]).floatValue()));
             locations.put(id, proxy(LocationAPI.class, answers));
@@ -1830,6 +2122,68 @@ class CoopAgentQueryVerbsTest {
                     },
                     "isActive", args -> active,
                     "isActiveOrInProgress", args -> active));
+        }
+    }
+
+    private static final class FakeAbilityFleet {
+        private AbilityPlugin plugin;
+        private final AbilityPlugin grantedPlugin;
+        private final List<String> calls = new ArrayList<>();
+        private final Set<String> known = new LinkedHashSet<>();
+        private int addCalls;
+        private int characterAddCalls;
+        private boolean characterMissing;
+        private boolean ownershipUnreadable;
+        private boolean rejectCharacterGrant;
+
+        private FakeAbilityFleet(AbilityPlugin plugin, AbilityPlugin grantedPlugin) {
+            this.plugin = plugin;
+            this.grantedPlugin = grantedPlugin;
+            if (plugin != null) {
+                known.add("generate_slipsurge");
+            }
+        }
+
+        private void addNativeAbility(String id) {
+            calls.add("add:" + id);
+            addCalls++;
+            // Pinned BaseCampaignEntity.addAbility returns before replacing an existing plugin.
+            if (plugin == null) {
+                plugin = grantedPlugin;
+            }
+        }
+
+        private void reconcileAbilities() {
+            if (!known.contains("generate_slipsurge")) {
+                plugin = null;
+            }
+        }
+
+        private CoopAgentCommands.Context context() {
+            CampaignFleetAPI fleet = CoopAgentQueryVerbsTest.proxy(CampaignFleetAPI.class, answers(
+                    "getAbility", arguments -> {
+                        calls.add("get:" + arguments[0]);
+                        return plugin;
+                    },
+                    "addAbility", arguments -> {
+                        addNativeAbility((String) arguments[0]);
+                        return null;
+                    }));
+            CharacterDataAPI character = proxy(CharacterDataAPI.class, answers(
+                    "getAbilities", arguments -> ownershipUnreadable ? null : known,
+                    "addAbility", arguments -> {
+                        String id = (String) arguments[0];
+                        calls.add("character-add:" + id);
+                        characterAddCalls++;
+                        if (!rejectCharacterGrant) {
+                            known.add(id);
+                            // PlayerCharacterData.addAbility also installs the native fleet plugin.
+                            addNativeAbility(id);
+                        }
+                        return null;
+                    }));
+            return contextFor(proxy(SectorAPI.class, answers("getPlayerFleet", arguments -> fleet,
+                    "getCharacterData", arguments -> characterMissing ? null : character)));
         }
     }
 

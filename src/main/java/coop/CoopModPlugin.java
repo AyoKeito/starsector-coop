@@ -5,6 +5,14 @@ import com.fs.starfarer.api.Global;
 import com.thoughtworks.xstream.XStream;
 import coop.campaign.CoopAllyToggleAbility;
 import coop.campaign.CoopStoryChainGate;
+import coop.campaign.CoopSlipstreamWorld;
+import coop.campaign.CoopSensorGhostManager;
+import coop.ambient.CoopSlipstreamFadeBridge;
+import coop.ambient.CoopWreckBridge;
+import coop.ambient.CoopLightBridge;
+import coop.ambient.CoopEncounterReplayBridge;
+import coop.storm.CoopStormBridge;
+import coop.campaign.CoopAbyssalDespawner;
 import coop.fleet.CoopFullFidelitySystemDriver;
 import coop.fleet.CoopGuestMirrorHandle;
 import coop.fleet.CoopGuestPresence;
@@ -52,6 +60,7 @@ public class CoopModPlugin extends BaseModPlugin {
         super.onApplicationLoad();
         CoopLog.info(CoopModPlugin.class, "CoopModPlugin loaded");
         publishLauncherProperties();
+        publishStormRole();
         checkGameVersion();
         String newGameSeed = CoopNetStartupConfig.newGameSeedFromSystemProperties();
         if (!newGameSeed.isEmpty()) {
@@ -60,6 +69,17 @@ public class CoopModPlugin extends BaseModPlugin {
                             + CoopNetStartupConfig.NEW_GAME_SEED_PROPERTY
                             + "=" + newGameSeed);
             publishSeedForTheForks(newGameSeed);
+        }
+    }
+
+    /** Native storm readResolve runs before onGameLoad, so its role must come from launch config. */
+    static void publishStormRole() {
+        try {
+            CoopStormBridge.configureGuest(CoopNetStartupConfig.fromSystemProperties().role()
+                    == coop.net.CoopConnectionRole.GUEST);
+        } catch (RuntimeException | LinkageError ex) {
+            CoopStormBridge.configureGuest(false);
+            CoopLog.warn(CoopModPlugin.class, "Coop could not resolve the storm launch role", ex);
         }
     }
 
@@ -341,6 +361,8 @@ public class CoopModPlugin extends BaseModPlugin {
         // Before the pump installs: no session can be active yet, so this only ever sees mirrors
         // orphaned by a previous session's save (see CoopMirrorOrphanSweeper).
         CoopMirrorOrphanSweeper.sweep(Global.getSector());
+        // Tag saved native trail owners before replacing Guest's world-affecting ghost manager.
+        prepareAmbientWorld(Global.getSector());
         // Before the pump, so it sits earlier in the transient script list and runs first each frame:
         // it captures the engine's per-frame delta for the full-fidelity guest-system drive and is the
         // always-on observer that releases the drive when the pump stops ticking it.
@@ -375,6 +397,15 @@ public class CoopModPlugin extends BaseModPlugin {
         // depends on it, and it must not stand between a load and a working session.
         installExpectedCampaignNotice(newGame);
         CoopLog.info(CoopModPlugin.class, "CoopNetPump registered");
+    }
+
+    static void prepareAmbientWorld(com.fs.starfarer.api.campaign.SectorAPI sector) {
+        if (sector == null) return;
+        CoopSlipstreamFadeBridge.markExistingNativeTrails(sector);
+        boolean guest = CoopNetStartupConfig.fromSystemProperties().role() == coop.net.CoopConnectionRole.GUEST;
+        CoopSensorGhostManager.install(sector, guest);
+        // Recreate transient terrain control before the first native or background terrain frame.
+        CoopSlipstreamWorld.prepareLoad(sector);
     }
 
     /**
@@ -517,7 +548,12 @@ public class CoopModPlugin extends BaseModPlugin {
      */
     static void beginGameSession() {
         clearPreviousGameStatics();
+        publishStormRole();
         CoopStoryChainGate.publish(Global.getSector());
+        CoopWreckBridge.setGuestMode(Global.getSector() != null && Global.getSector().getMemoryWithoutUpdate()
+                .getBoolean(CoopStoryChainGate.GUEST_MEMORY_FLAG));
+        CoopLightBridge.setGuestMode(Global.getSector() != null && Global.getSector().getMemoryWithoutUpdate()
+                .getBoolean(CoopStoryChainGate.GUEST_MEMORY_FLAG));
     }
 
     /**
@@ -533,6 +569,11 @@ public class CoopModPlugin extends BaseModPlugin {
      * clears, and a failed save must not carry it into the next campaign.
      */
     static void clearPreviousGameStatics() {
+        CoopSlipstreamWorld.releaseControlled();
+        CoopWreckBridge.clear();
+        CoopLightBridge.clear();
+        CoopEncounterReplayBridge.clear();
+        CoopStormBridge.clear();
         CoopGuestPresence.clearForGameLoad();
         CoopFullFidelitySystemDriver.reset();
     }
@@ -605,6 +646,7 @@ public class CoopModPlugin extends BaseModPlugin {
         x.alias("coopStats", CoopSessionStats.class);
         x.alias("coopStatsPlayer", CoopSessionStats.PlayerStats.class);
         x.alias("coopStatsLoss", CoopSessionStats.ShipLoss.class);
+        x.alias("coopAbyssalDespawner", CoopAbyssalDespawner.class);
     }
 
     /**
@@ -618,6 +660,7 @@ public class CoopModPlugin extends BaseModPlugin {
     @Override
     public void beforeGameSave() {
         CoopFullFidelitySystemDriver.beginSave();
+        CoopSensorGhostManager.beforeSave(Global.getSector());
         CoopGuestSnapshotStore.writeIntoCurrentSector();
         // Phase 21: the tally goes in, the two intel pages come out. Both pages are transient by
         // design (see CoopSessionIntel) -- nothing of either class may reach XStream -- while the
@@ -649,6 +692,7 @@ public class CoopModPlugin extends BaseModPlugin {
     @Override
     public void onGameSaveFailed() {
         CoopFullFidelitySystemDriver.endSave();
+        CoopSensorGhostManager.afterSave(Global.getSector());
         CoopSessionIntel.ensureRegistered(Global.getSector());
         CoopSessionStatsIntel.ensureRegistered(Global.getSector());
         CoopOptionsPage.ensureRegistered(Global.getSector());
@@ -659,6 +703,7 @@ public class CoopModPlugin extends BaseModPlugin {
     @Override
     public void afterGameSave() {
         CoopFullFidelitySystemDriver.endSave();
+        CoopSensorGhostManager.afterSave(Global.getSector());
         // Phase 21: put the transient pages back, before anything else. The save is written; from
         // here the player is back in the campaign and expects the intel screen intact.
         CoopSessionIntel.ensureRegistered(Global.getSector());
