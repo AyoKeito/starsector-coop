@@ -29,7 +29,7 @@ K:\Starsector\mods\coop
 |-- src/main/java/coop/   the mod: 24 packages + CoopModPlugin
 |-- src/launcher/java/    coop.launcher, the FlatLaf desktop launcher (no Starsector API on its classpath)
 |-- src/test/java/coop/   JUnit 5 suite, mirrors the main packages + coop/launcher + coop/testing
-|-- forks/                classpath-shadow copies of 19 vanilla classes -> coop-forks.jar
+|-- forks/                pinned vanilla classpath-shadow copies -> coop-forks.jar
 |-- data/                 rules.csv, campaign/abilities.csv, config/coop_options.json,
 |                         config/settings.json, version/
 |-- docs/                 design, plan ledger, generated roadmap, player guides

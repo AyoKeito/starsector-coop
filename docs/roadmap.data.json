@@ -10,84 +10,84 @@
       "key": "built",
       "icon": "✓",
       "label": "Built",
-      "note": "Completed phases with recorded verification in the plan's Phase Status Ledger."
+      "note": "Completed capabilities and their verification remain recorded in the plan's Phase Status Ledger."
     },
     {
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "P26: finish M4/M5 visual acceptance; Guest-proximity triggering remains separate."
+      "note": "P26 reliability fixes are complete; native M4/M5 visual acceptance remains open."
     },
     {
       "key": "next",
       "icon": "▶",
       "label": "Next up",
-      "note": "Finish P26; deferred M3 edge cases remain non-blocking."
+      "note": "Finish P26 native acceptance before expanding scope; deferred M3 edges remain non-blocking."
     },
     {
       "key": "queued",
       "icon": "◆",
       "label": "Queued for V1",
-      "note": "All V1 phases are complete."
+      "note": "V1 is complete; remaining feature phases are tracked as post-V1 work."
     },
     {
       "key": "postv1",
       "icon": "◌",
       "label": "Post-V1",
-      "note": "P26 remains partial; P22, P25 and P27 are queued, and P33 is built."
+      "note": "P26 remains partial, P22/P25/P27 remain queued, and P33 is built with native follow-ups."
     }
   ],
-  "hereHead": "You are here: P26 bounded M4/M5 MCP checks pass; native visual checks remain.",
-  "here": "<b>V1 is complete.</b> P26 remains partial: M1/M2, shared wrecks and bounded M3 acceptance are complete. Bounded M4 execution and M5 lifecycle/travel MCP checks pass. Finish native visual acceptance; computer use remains paused. Guest-proximity encounter triggering remains unbuilt. Evidence and limits stay in the plan and acceptance reports.",
+  "hereHead": "You are here: P26 reliability fixes complete; native visual acceptance remains.",
+  "here": "<b>V1 is complete.</b> P26 reliability and traffic fixes are complete; bounded M4/M5 MCP checks pass. Next, finish native storm/boost/mirror and ghost/trail visual acceptance; computer use remains paused. Guest-proximity encounter triggering remains unbuilt. Deferred M3 edges remain non-blocking; evidence and limits stay in the plan and acceptance reports.",
   "attention": [
     {
       "sev": "scope",
       "sevLabel": "P26 remaining milestones",
       "head": "Verify M4 storms and M5 ghosts/trails",
-      "state": "bounded MCP acceptance recorded; visual checks open",
-      "body": "Compare the same global storm and owner-only effects visually, then inspect local ghosts and shared trail rendering. Resume computer use when requested. Record results and evidence limits in the acceptance reports."
+      "state": "reliability fixes complete; native visuals unverified",
+      "body": "Compare shared storm phases and owner-only boost/clearing effects, then inspect local ghosts and shared trails. Pass: matching global weather, effects confined to the correct owner, and correct ghost/trail rendering. Resume computer use when requested; record evidence limits in the acceptance reports."
     },
     {
       "sev": "scope",
       "sevLabel": "before public listing",
       "head": "Publication follow-ups: forum-thread metadata and the COOP TEST start",
       "state": "post-sign-off reminders; Phase 23 is complete",
-      "body": "(1) Create the forum thread, then put its URL in <code>docs/player/LISTING.md</code> and its numeric id in <code>modThreadId</code> in <code>coop.version</code> (0 today, so Version Checker offers no link). Verify: Version Checker's mod entry links to the thread. (2) Remove or dev-gate the COOP TEST start: rows <code>coopZigguratStart</code> and <code>coopZigguratPicked</code> in <code>data/campaign/rules.csv</code> (option 6, a Ziggurat plus 1,000,000 credits). Verify: a new game shows five occupation choices, or six only with the dev flag. The forced tutorial skip and forced Normal difficulty stay; they are permanent mod behaviour (see the plan, <span class=\"rp\" data-jump=\"23\">Phase 23</span>)."
+      "body": "Create the forum thread and set its URL in <code>docs/player/LISTING.md</code> and id in <code>coop.version</code>. Pass: Version Checker links to it. Dev-gate the COOP TEST rows in <code>rules.csv</code>. Pass: five occupation choices, or six only in dev mode. Keep forced tutorial skip and Normal difficulty; details remain in Phase 23."
     },
     {
       "sev": "revisit",
       "sevLabel": "optional QA follow-ups",
       "head": "Post-sign-off probes awaiting a trigger",
       "state": "non-blocking; Phase 19 is complete, pass criteria retained",
-      "body": "<b>Step 33, guest saturation bombardment decivilising the host's colony:</b> pass = the next reconnect passes the fingerprint check. <b>S4-B, mothballed hull cargo:</b> find a trade fleet carrying hulls; pass = the guest draws them mothballed, not as 0% CR warships. <b>Post-battle mirror freeze expiry</b> needs a lost BATTLE_RESULT and has no cheap trigger; stays unit-verified. <b>UPnP router without <code>GetSpecificPortMappingEntry</code>:</b> cannot be exercised on this network (the MikroTik answers it); expected behaviour is a conflict report and a port change, not an eviction."
+      "body": "At suitable triggers, verify: Guest bombardment decivilisation permits reconnect; traded mothballed hulls render mothballed; mirror freeze expires after a lost <code>BATTLE_RESULT</code>; and a router lacking <code>GetSpecificPortMappingEntry</code> reports conflict and changes port without evicting another mapping. These remain non-blocking; trigger details and evidence limits stay in the plan."
     },
     {
       "sev": "revisit",
       "sevLabel": "Phase 33 checklist",
       "head": "Ally battles: a destroyed ally ship and an NPC-started fight",
       "state": "open; both unit-verified, never seen live",
-      "body": "<b>Destroyed ally ship:</b> eight ally fights on 2026-09-21 and 2026-09-25 ended with no ally ship lost (the AI kept the partner's Kites back or they survived). Pass = the owner's log shows <code>ALLY_BATTLE_RESULT applied ... removed=[&lt;ship&gt;]</code>, the ship is gone from the owner's fleet screen, the banner lists it under Lost, and the pilot's mirror of the owner rebuilds without it. <b>NPC starts the fight:</b> a hostile fleet attacks one player while the partner is parked within 700 su with Fight Alongside on; pass = the same join line and result as a player-started fight. Pirates avoid a Ziggurat pair, so this needs a weaker fleet or a stronger enemy."
+      "body": "Lose an ally ship: pass when <code>ALLY_BATTLE_RESULT</code> removes it from the owner's fleet and partner mirror, and the banner lists it under Lost. Trigger an NPC attack with Fight Alongside enabled and the partner within 700 su: pass when joining and results match a player-started fight. Use fleets that enemies will engage."
     },
     {
       "sev": "gap",
       "sevLabel": "known gap",
       "head": "S4-C: fleet churn in far systems still resends the NPC set",
-      "state": "partial; 0.14 structural sends/s idle (was 0.3-0.5/s)",
-      "body": "Structural NPC_FLEET_SET sends are scoped to the two observers' locations, but route fleets despawning in the host's own system count as near, so a parked pair still sees about one 20 KB set every 7 s. Candidate fix: treat the despawn of a fleet the guest has never mirrored as far. Measure: count <code>Coop sent NPC_FLEET_SET</code> lines in the host log over a 130 s window with both fleets parked; target is near zero."
+      "state": "partial; near-location churn still triggers structural snapshots",
+      "body": "Consider excluding despawns of fleets Guest has never mirrored from structural changes. Count <code>Coop sent NPC_FLEET_SET</code> lines over 130 seconds with both players parked. Pass: near-zero sends without losing visible fleet creation/removal. Observer-location scoping already exists; remaining churn and baseline measurements stay documented in the plan."
     },
     {
       "sev": "gap",
       "sevLabel": "known gap",
       "head": "Parked Phase 14 fallout (cosmetic)",
       "state": "deferred; re-judge before spending anything",
-      "body": "Synthesized customs pursuit of the guest reads coarser than vanilla steering (mechanism and ceiling in <code>starsector-runtime-limitations.md</code>, NPC mirrors); re-judge at the next customs encounter, since <span class=\"rp\" data-jump=\"29\">Phase 29</span> M1's kinematic drive landed after the verdict. Also parked: NPC mirrors carry d-mods but not the autofit weapon loadout, and with the two players in different populated systems only one gets ambient spawns (single <code>currSpawnLoc</code>)."
+      "body": "Recheck customs pursuit after the motion changes: pass when visible steering matches vanilla. Also inspect NPC autofit loadouts and ambient spawns with players in separate populated systems; pass when equipment matches and both observers receive spawns. These remain deferred; mechanisms and limits are in <code>starsector-runtime-limitations.md</code> and Phase 14."
     },
     {
       "sev": "risk",
       "sevLabel": "maintenance",
-      "head": "Six vanilla classes are forked (pinned 0.98a-RC8)",
+      "head": "Vanilla classpath forks are pinned to 0.98a-RC8",
       "state": "guarded, re-fork on game update",
-      "body": "The guest-presence family (<code>RouteManager</code>, <code>PlayerVisibleFleetManager</code>, <code>DisposableFleetManager</code> + two subclasses, <code>SourceBasedFleetManager</code>) plus the pre-existing <code>Misc</code>/procgen forks ride the coop-forks.jar classpath shadow. A Starsector update requires re-extracting each file and re-applying the small additive diffs; the shared runtime guard (<code>CoopPresenceRegistry.getForFork</code>) loudly disables the presence terms on a version mismatch instead of drifting silently. Re-fork procedure: <code>starsector-runtime-limitations.md</code>, Classpath forks."
+      "body": "On an engine update, re-extract every fork and reapply its <code>COOP FORK</code> hunks, then update the pinned version. Pass: version guards, fork-marker checks and native-hook smoke tests succeed on the updated engine. Follow <code>starsector-runtime-limitations.md</code>, Classpath forks; current fork scope is listed in the codebase map."
     }
   ],
   "phases": [
