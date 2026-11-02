@@ -45,7 +45,6 @@ public final class CoopSlipstreamWorld implements CoopSlipstreamAuthority.Stream
 
     private static SectorAPI controlledSector;
     private static boolean controllingHost;
-    private static boolean frozen;
     private static final Map<SlipstreamTerrainPlugin2, Controlled> CONTROLS = new IdentityHashMap<>();
     private static final Map<SlipstreamTerrainPlugin2, CampaignTerrainAPI> TRAILS = new IdentityHashMap<>();
     private static final Map<String, List<CoopSlipstreamRecord>> PENDING = new LinkedHashMap<>();
@@ -75,7 +74,6 @@ public final class CoopSlipstreamWorld implements CoopSlipstreamAuthority.Stream
         selectControlledSector(sector);
         boolean roleChanged = controllingHost != host;
         controllingHost = host;
-        frozen = holdForGrace;
         List<CampaignTerrainAPI> terrains = hyperspace(sector).getTerrainCopy();
         Set<CampaignTerrainAPI> live = Collections.newSetFromMap(new IdentityHashMap<>());
         Set<CampaignTerrainAPI> liveTrails = Collections.newSetFromMap(new IdentityHashMap<>());
@@ -166,7 +164,6 @@ public final class CoopSlipstreamWorld implements CoopSlipstreamAuthority.Stream
     /** A configured peer may spend many paused frames in its lobby before the handshake completes. */
     public static void holdLoadedControlled(SectorAPI sector) {
         if (sector != null) selectControlledSector(sector);
-        frozen = true;
     }
 
     /** No plugin, sector, cursor or transport references survive a solo/session/load boundary. */
@@ -179,7 +176,6 @@ public final class CoopSlipstreamWorld implements CoopSlipstreamAuthority.Stream
         CoopSlipstreamFadeBridge.clear();
         controlledSector = null;
         controllingHost = false;
-        frozen = false;
     }
 
     private static void selectControlledSector(SectorAPI sector) {

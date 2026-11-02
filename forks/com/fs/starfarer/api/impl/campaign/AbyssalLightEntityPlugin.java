@@ -92,7 +92,7 @@ public class AbyssalLightEntityPlugin extends BaseCustomEntityPlugin {
 				return;
 			}
 			// COOP FORK (0.98a-RC8): player mirrors are never native NPC casualties.
-			if (!coop.ambient.CoopLightBridge.allowDwellerEncounter(light, fleet)) {
+			if (!coopAllowDwellerEncounter(light, fleet)) {
 				done = true;
 				return;
 			}
@@ -101,7 +101,7 @@ public class AbyssalLightEntityPlugin extends BaseCustomEntityPlugin {
 			if (elapsed > triggerDelay) {
 				if (fleet.isPlayerFleet()) {
 					// Wait for the ordinary shared interaction claim without expiring the trigger.
-					if (!coop.ambient.CoopLightBridge.allowDwellerDialog(light, fleet)) {
+					if (!coopAllowDwellerDialog(light, fleet)) {
 						elapsed = triggerDelay;
 						return;
 					}
@@ -230,7 +230,7 @@ public class AbyssalLightEntityPlugin extends BaseCustomEntityPlugin {
 	public void despawn(DespawnType type) {
 		if (isDespawning()) return;
 		// COOP FORK: native Dweller combat queues Guest consumption; Host confirms the removal.
-		if (!coop.ambient.CoopLightBridge.allowNativeDespawn(entity)) return;
+		if (!coopAllowNativeDespawn(entity)) return;
 
 		float dur = 1f;
 		if (type == DespawnType.EXPAND) dur = 2f;
@@ -335,7 +335,7 @@ public class AbyssalLightEntityPlugin extends BaseCustomEntityPlugin {
 
 		float days = Misc.getDays(amount);
 		// COOP FORK: Guest lifetime and depth cleanup are supplied by the complete Host set.
-		if (!coop.ambient.CoopLightBridge.holdsGuestLifetime(entity)) {
+		if (!coopHoldsGuestLifetime(entity)) {
 			params.durationDays -= days;
 			if (params.durationDays <= 0f || Misc.getAbyssalDepth(entity) < 1f) {
 				despawn(DespawnType.FADE_OUT);
@@ -365,7 +365,7 @@ public class AbyssalLightEntityPlugin extends BaseCustomEntityPlugin {
 		if (Global.getSector().getMemoryWithoutUpdate().getBoolean(MemFlags.GLOBAL_INTERDICTION_PULSE_JUST_USED_IN_CURRENT_LOCATION)) {
 			if (entity.getContainingLocation() != null) {
 				for (CampaignFleetAPI fleet : entity.getContainingLocation().getFleets()) {
-					if (!coop.ambient.CoopLightBridge.allowDwellerEncounter(entity, fleet)) continue;
+					if (!coopAllowDwellerEncounter(entity, fleet)) continue;
 					float range = InterdictionPulseAbility.getRange(fleet);
 					float dist = Misc.getDistance(fleet.getLocation(), entity.getLocation());
 					if (dist > range) continue;
@@ -381,7 +381,7 @@ public class AbyssalLightEntityPlugin extends BaseCustomEntityPlugin {
 								}
 							}
 						} else {
-							if (coop.ambient.CoopLightBridge.handlePulse(entity, fleet, false)) {
+							if (coopHandlePulse(entity, fleet, false)) {
 								if (isDespawning()) return;
 								continue;
 							}
@@ -399,7 +399,7 @@ public class AbyssalLightEntityPlugin extends BaseCustomEntityPlugin {
 		if (Global.getSector().getMemoryWithoutUpdate().getBoolean(MemFlags.GLOBAL_SENSOR_BURST_JUST_USED_IN_CURRENT_LOCATION)) {
 			if (entity.getContainingLocation() != null) {
 				for (CampaignFleetAPI fleet : entity.getContainingLocation().getFleets()) {
-					if (!coop.ambient.CoopLightBridge.allowDwellerEncounter(entity, fleet)) continue;
+					if (!coopAllowDwellerEncounter(entity, fleet)) continue;
 					float range = SENSOR_BURST_TRIGGER_RANGE + fleet.getRadius() + entity.getRadius();
 					float dist = Misc.getDistance(fleet.getLocation(), entity.getLocation());
 					if (dist > range) continue;
@@ -415,7 +415,7 @@ public class AbyssalLightEntityPlugin extends BaseCustomEntityPlugin {
 								}
 							}
 						} else {
-							if (coop.ambient.CoopLightBridge.handlePulse(entity, fleet, true)) {
+							if (coopHandlePulse(entity, fleet, true)) {
 								if (isDespawning()) return;
 								continue;
 							}
@@ -431,7 +431,45 @@ public class AbyssalLightEntityPlugin extends BaseCustomEntityPlugin {
 		}
 	}
 
-	/** The native actor-local reward branch, also used after an authoritative co-op result. */
+	// COOP FORK: contain every bridge callback at the native boundary, without granting,
+	// despawning or opening a dialog after an unavailable co-op decision. No saved fields.
+	private static boolean coopAllowDwellerEncounter(SectorEntityToken light, CampaignFleetAPI fleet) {
+		try { return coop.ambient.CoopLightBridge.allowDwellerEncounter(light, fleet); }
+		catch (Throwable failure) {
+			coop.ambient.CoopLightBridge.reportNativeFailure(coop.ambient.CoopLightBridge.NativeHook.ENCOUNTER, failure);
+			return false;
+		}
+	}
+	private static boolean coopAllowDwellerDialog(SectorEntityToken light, CampaignFleetAPI fleet) {
+		try { return coop.ambient.CoopLightBridge.allowDwellerDialog(light, fleet); }
+		catch (Throwable failure) {
+			coop.ambient.CoopLightBridge.reportNativeFailure(coop.ambient.CoopLightBridge.NativeHook.DIALOG, failure);
+			return false;
+		}
+	}
+	private static boolean coopAllowNativeDespawn(SectorEntityToken light) {
+		try { return coop.ambient.CoopLightBridge.allowNativeDespawn(light); }
+		catch (Throwable failure) {
+			coop.ambient.CoopLightBridge.reportNativeFailure(coop.ambient.CoopLightBridge.NativeHook.DESPAWN, failure);
+			return false;
+		}
+	}
+	private static boolean coopHoldsGuestLifetime(SectorEntityToken light) {
+		try { return coop.ambient.CoopLightBridge.holdsGuestLifetime(light); }
+		catch (Throwable failure) {
+			coop.ambient.CoopLightBridge.reportNativeFailure(coop.ambient.CoopLightBridge.NativeHook.LIFETIME, failure);
+			return true;
+		}
+	}
+	private static boolean coopHandlePulse(SectorEntityToken light, CampaignFleetAPI fleet, boolean sensorBurst) {
+		try { return coop.ambient.CoopLightBridge.handlePulse(light, fleet, sensorBurst); }
+		catch (Throwable failure) {
+			coop.ambient.CoopLightBridge.reportNativeFailure(coop.ambient.CoopLightBridge.NativeHook.PULSE, failure);
+			return true;
+		}
+	}
+
+	// COOP FORK: native actor-local reward, also used after an authoritative co-op result.
 	public static void coopGrantPulseBonus(CampaignFleetAPI fleet, boolean sensorBurst, float bonus, int points) {
 		// Resolve the only external operation before mutating the native pending rewards.
 		if (sensorBurst && fleet.isPlayerFleet()) EncounterManager.getInstance().getCreatorTimeout().clear();

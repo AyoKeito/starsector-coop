@@ -5541,6 +5541,7 @@ class CoopNetPumpTest {
 
     private static final class RecordingSector {
         private boolean paused;
+        private MemoryAPI memory;
         private final RecordingCampaignUi campaignUi;
         private final RecordingFleet playerFleet;
         private final LocationAPI hyperspace = emptyHyperspace();
@@ -5609,6 +5610,10 @@ class CoopNetPumpTest {
                             }
                             case "getPersistentData" -> {
                                 return persistentData;
+                            }
+                            case "getMemoryWithoutUpdate" -> {
+                                if (memory != null) return memory;
+                                throw new UnsupportedOperationException(method.getName());
                             }
                             case "getEconomy" -> {
                                 return economyProxy(markets);
@@ -8853,6 +8858,26 @@ class CoopNetPumpTest {
     }
 
     @Test
+    void soloLoadReadiesSavedEncounterLifetimesWithoutEnablingGuestDespawn() {
+        for (CoopConnectionRole role : List.of(CoopConnectionRole.NONE, CoopConnectionRole.GUEST)) {
+            RecordingNetService service = new RecordingNetService(role);
+            service.connected = false;
+            AtomicLong now = new AtomicLong(1_000L);
+            CoopSessionState session = new CoopSessionState(() -> "solo");
+            RecordingSector sector = new RecordingSector(false);
+            sector.memory = coop.testing.ApiProxies.memory(new java.util.LinkedHashMap<>());
+            Global.setSector(sector.proxy());
+            CoopNetPump pump = livePump(service, session, now::get);
+            var world = new RecordingEncounterWorld(null);
+            pump.setEncounterAuthorityForTest(new coop.campaign.CoopEncounterAuthority(
+                    service, session, now::get, world));
+            pump.advance(0f);
+            assertEquals(0L, pump.frameFailureCount(), "the offline frame must reach encounter lifetime maintenance");
+            assertEquals(role == CoopConnectionRole.NONE ? 1 : 0, world.presenceUpdates);
+        }
+    }
+
+    @Test
     void initialEncounterSetSurvivesTheLifecycleEdgeAndReportsLaterHintEdits() {
         RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
         AtomicLong now = new AtomicLong(1_000L);
@@ -8898,7 +8923,7 @@ class CoopNetPumpTest {
         assertTrue(pump.lightReplicationStreamingForTest());
         assertEquals(java.util.Set.of(SECOND_LIGHT_ID), world.tagged);
         assertEquals(0, world.reconciliations);
-        world.failUpsert = false; now.addAndGet(250); pump.advance(0f);
+        world.failUpsert = false; now.addAndGet(1_000); pump.advance(0f);
         assertEquals(java.util.Set.of(LIGHT_ID), world.tagged);
         assertEquals(List.of(SECOND_LIGHT_ID), world.removed);
         assertEquals(1, world.reconciliations,
@@ -9759,13 +9784,14 @@ class CoopNetPumpTest {
     private static final class RecordingEncounterWorld implements coop.campaign.CoopEncounterAuthority.EncounterWorld {
         final coop.campaign.CoopEncounterRecord record;
         int upserts;
+        int presenceUpdates;
         boolean visited;
         RecordingEncounterWorld(coop.campaign.CoopEncounterRecord record) { this.record = record; }
         @Override public List<coop.campaign.CoopEncounterRecord> captureHost() { return List.of(record); }
         @Override public java.util.Set<String> taggedIds() { return java.util.Set.of(record.instanceId()); }
         @Override public void upsert(coop.campaign.CoopEncounterRecord value) { upserts++; }
         @Override public void remove(String id) { throw new AssertionError("unexpected encounter removal"); }
-        @Override public void updateGuestPresence(boolean grace) { }
+        @Override public void updateGuestPresence(boolean grace) { presenceUpdates++; }
         @Override public List<coop.campaign.CoopEncounterRecord.EntityState> guestStates() {
             return List.of(new coop.campaign.CoopEncounterRecord.EntityState(
                     record.entityId(record.entities().get(0)), null, null, visited
@@ -9885,13 +9911,14 @@ class CoopNetPumpTest {
         pump.advance(0f);
 
         assertEquals(1, world.sweepAttempts);
-        assertFalse(pump.npcReplicationStreamingForTest());
+        assertTrue(pump.npcReplicationStreamingForTest(),
+                "a pending terrain sweep must not skip NPC lifecycle and mirroring");
         assertFalse(pump.npcFleetSuppressorForTest().spawnersSuppressed());
         assertEquals(0, pump.npcFleetSuppressorForTest().spawnerSuppressionRuns(),
                 "the manager must remain readable while its seasonal membership sweep is unavailable");
 
         world.failSweep = false;
-        now.addAndGet(100L);
+        now.addAndGet(250L);
         pump.advance(0f);
 
         assertEquals(2, world.sweepAttempts);
@@ -9904,6 +9931,25 @@ class CoopNetPumpTest {
         now.addAndGet(100L);
         pump.advance(0f);
         assertEquals(2, world.sweepAttempts);
+        assertEquals(1, pump.npcFleetSuppressorForTest().spawnerSuppressionRuns());
+    }
+
+    @Test
+    void aPersistentSeasonalSweepFailureStillStartsNpcReplicationAndEventuallySuppressesSpawners() {
+        RecordingNetService service = new RecordingNetService(CoopConnectionRole.GUEST);
+        AtomicLong now = new AtomicLong(1_000L);
+        CoopSessionState session = activeGuestSession();
+        Global.setSector(new RecordingSector(false).proxy());
+        CoopNetPump pump = livePump(service, session, now::get);
+        RecordingStreamWorld world = installStreamWorld(pump, service, session, now);
+        world.failSweep = true;
+        for (int frame = 0; frame < 10; frame++) {
+            pump.advance(0f);
+            now.addAndGet(250L);
+        }
+        assertEquals(3, world.sweepAttempts);
+        assertTrue(pump.npcReplicationStreamingForTest());
+        assertTrue(pump.npcFleetSuppressorForTest().spawnersSuppressed());
         assertEquals(1, pump.npcFleetSuppressorForTest().spawnerSuppressionRuns());
     }
 

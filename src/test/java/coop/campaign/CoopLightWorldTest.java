@@ -19,6 +19,7 @@ import coop.interaction.CoopInteractionGate;
 import coop.presence.CoopPresenceRegistry;
 import coop.testing.ApiProxies;
 import coop.testing.ProxyDefaults;
+import coop.testing.LogCapture;
 import coop.util.CoopDebug;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -378,6 +379,125 @@ class CoopLightWorldTest {
         f.saved.remove(CoopLightWorld.STATE_KEY);
         f.lights.get(0).memory.put(CoopLightWorld.LIGHT_ID_KEY, 4);
         assertThrows(IllegalStateException.class, f.world::captureHost);
+    }
+
+    @Test void lifecycleRemovalDoesNotWriteRewardHistoryButConsumptionStillSurvivesReload() {
+        Fixture f = new Fixture(); f.world.installBridge(true, "guest");
+        String lightId = id(); f.lights.get(0).tag(lightId);
+        for (int i = 0; i < 100; i++) f.world.remove(lightId);
+        assertTrue(f.saved.isEmpty());
+        assertEquals(0, f.world.readOnlyStateCounts().get("tombstones"));
+        assertTrue(f.lights.get(0).fading);
+        f.lights.get(0).fading = false;
+        CoopLightBridge.handlePulse(f.lights.get(0).entity, f.local.entity, false);
+        CoopLightCodec.Request request = f.world.pendingRequests().get(0);
+        f.world.acceptOutcome(outcome(request, "guest", true, 1, 7));
+        CoopLightWorld reloaded = f.newWorld();
+        assertEquals(1, reloaded.readOnlyStateCounts().get("tombstones"));
+        assertEquals(1, reloaded.readOnlyStateCounts().get("applied"));
+        assertFalse(reloaded.isAvailable(lightId));
+    }
+
+    @Test void rejectionQuotaPreservesCachedRepliesAndAcceptedRequestsIncludingOversizedLegacyHistory() {
+        for (int initial : List.of(CoopLightWorld.MAX_REJECTED_RESULTS - 1,
+                CoopLightWorld.MAX_REJECTED_RESULTS + 1)) {
+            Fixture f = new Fixture(); f.world.installBridge(false, "host");
+            String liveId = f.world.captureHost().get(0).id();
+            String unknownId = "light:" + new UUID(1L, 0L);
+            CoopLightCodec.Request firstRequest = new CoopLightCodec.Request(unknownId,
+                    new UUID(0L, 1L).toString(), CoopLightCodec.Action.PULSE);
+            CoopLightCodec.Outcome firstReply = outcome(firstRequest, "guest", false, 0, 0);
+            StringBuilder saved = new StringBuilder("[");
+            for (int i = 0; i < initial; i++) {
+                if (i > 0) saved.append(',');
+                CoopLightCodec.Request denied = new CoopLightCodec.Request(unknownId,
+                        new UUID(0L, i + 1L).toString(), CoopLightCodec.Action.PULSE);
+                saved.append('"').append(coop.net.CoopJson.escape("R" + outcome(denied, "guest", false, 0, 0).encode())).append('"');
+            }
+            f.saved.put(CoopLightWorld.STATE_KEY, saved.append(']').toString());
+            CoopLightWorld reloaded = f.newWorld(); reloaded.installBridge(false, "host");
+            assertEquals(initial, reloaded.readOnlyStateCounts().get("results"));
+            if (initial < CoopLightWorld.MAX_REJECTED_RESULTS) {
+                assertFalse(reloaded.applyRequest(request(unknownId, CoopLightCodec.Action.PULSE), "guest").accepted());
+            }
+            Object atQuota = f.saved.get(CoopLightWorld.STATE_KEY);
+            assertThrows(IllegalStateException.class,
+                    () -> reloaded.applyRequest(request(unknownId, CoopLightCodec.Action.PULSE), "guest"));
+            assertEquals(atQuota, f.saved.get(CoopLightWorld.STATE_KEY));
+            f.remoteAvailable = false;
+            assertEquals(firstReply, reloaded.applyRequest(firstRequest, "guest"));
+            f.remoteAvailable = true;
+            CoopLightCodec.Request valid = request(liveId, CoopLightCodec.Action.PULSE);
+            CoopLightCodec.Outcome accepted = reloaded.applyRequest(valid, "guest");
+            assertTrue(accepted.accepted());
+            f.remoteAvailable = false;
+            assertEquals(accepted, reloaded.applyRequest(valid, "guest"));
+            f.add("unrelated");
+            assertEquals("unrelated", reloaded.captureHost().get(0).hostEntityId());
+            assertEquals(0, reloaded.readOnlyStateCounts().get("pending"));
+            assertEquals(Math.max(initial, CoopLightWorld.MAX_REJECTED_RESULTS) + 1,
+                    reloaded.readOnlyStateCounts().get("results"));
+        }
+    }
+
+    @Test void legacyHistoryBeyondOldCountLimitRetainsGuardsAndAllowsAnotherReward() {
+        Fixture f = new Fixture(); f.world.installBridge(true, "guest");
+        StringBuilder saved = new StringBuilder("[");
+        for (int i = 0; i < 32_769; i++) {
+            if (i > 0) saved.append(',');
+            String uuid = new UUID(0L, i).toString();
+            saved.append('"').append('T').append("light:").append(uuid).append("\",")
+                    .append('"').append('A').append(uuid).append('"');
+        }
+        f.saved.put(CoopLightWorld.STATE_KEY, saved.append(']').toString());
+        String lightId = id(); f.lights.get(0).tag(lightId);
+        assertEquals(32_769, f.world.readOnlyStateCounts().get("tombstones"));
+        assertEquals(32_769, f.world.readOnlyStateCounts().get("applied"));
+        CoopLightBridge.handlePulse(f.lights.get(0).entity, f.local.entity, false);
+        CoopLightCodec.Request request = f.world.pendingRequests().get(0);
+        f.world.acceptOutcome(outcome(request, "guest", true, 1, 7));
+        CoopLightWorld reloaded = f.newWorld();
+        assertEquals(32_770, reloaded.readOnlyStateCounts().get("tombstones"));
+        assertEquals(32_770, reloaded.readOnlyStateCounts().get("applied"));
+        assertEquals(1, f.codec.grantAttempts);
+    }
+
+    @Test void replayAndConsumedEntityFailuresLeaveOtherLightsPublishableAndRecoverLater() {
+        Fixture f = new Fixture(); f.world.installBridge(false, "host"); f.world.captureHost();
+        f.codec.failDespawn = true;
+        assertThrows(IllegalStateException.class,
+                () -> CoopLightBridge.handlePulse(f.lights.get(0).entity, f.local.entity, false));
+        f.add("unrelated");
+        for (int i = 0; i < 3; i++) {
+            List<CoopLightRecord> records = f.world.captureHost();
+            assertEquals(1, records.size()); assertEquals("unrelated", records.get(0).hostEntityId());
+        }
+        // The cached accepted result can grant once even while native cleanup still fails.
+        assertTrue(f.world.pendingRequests().isEmpty()); assertEquals(1, f.codec.grantAttempts);
+        f.codec.failDespawn = false;
+        assertEquals(1, f.world.captureHost().size());
+        assertTrue(f.world.pendingRequests().isEmpty()); assertEquals(1, f.codec.grantAttempts);
+    }
+
+    @Test void uncertainHostGrantCannotBlockPublishingOtherLightsOrRetryTheNativeReward() {
+        Fixture f = new Fixture(); f.world.installBridge(false, "host"); f.world.captureHost();
+        f.codec.failGrant = true; f.codec.partialGrantBeforeFailure = true;
+        assertThrows(IllegalStateException.class,
+                () -> CoopLightBridge.handlePulse(f.lights.get(0).entity, f.local.entity, false));
+        f.add("unrelated");
+        CoopLightWorld reloaded = f.newWorld(); reloaded.installBridge(false, "host");
+        f.codec.failGrant = false;
+        LogCapture log = LogCapture.attach(CoopLightWorld.class);
+        try {
+            for (int i = 0; i < 10; i++) {
+                List<CoopLightRecord> records = reloaded.captureHost();
+                assertEquals(1, records.size()); assertEquals("unrelated", records.get(0).hostEntityId());
+            }
+            assertEquals(1, log.matching("Retaining uncertain light reward").size());
+        } finally { log.detach(); }
+        assertEquals(1, f.codec.grantAttempts);
+        assertEquals(1, reloaded.pendingRequests().size());
+        assertEquals(1, reloaded.readOnlyStateCounts().get("uncertain"));
     }
 
     @Test void partialNativeGrantFailureRemainsUncertainAcrossReloadAndCannotGrantAgain() {

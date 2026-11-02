@@ -136,6 +136,37 @@ class CoopAbyssalDespawnerTest {
     }
 
     @Test
+    void restoredSoloEncounterResumesNativeLifetimeAfterAnOffRolePresenceUpdate() throws Exception {
+        CoopAbyssalDespawner restored = savedCopy(solo());
+        restored.advance(CoopAbyssalDespawner.CHECK_INTERVAL_SECONDS);
+        assertTrue(queuedSystems.isEmpty(), "loading waits for current role publication");
+
+        // OFF mode publishes an absent Guest just as an idle Host does; no network session is needed.
+        restored.updateGuestPresence(null, false);
+        restored.advance(CoopAbyssalDespawner.CHECK_INTERVAL_SECONDS);
+
+        assertEquals(List.of(system), queuedSystems);
+        assertEquals(List.of(anchor), removedLinks);
+        assertTrue(restored.isDone());
+    }
+
+    @Test
+    void restoredSoloReadinessRetainsASavedGuestInsideHold() throws Exception {
+        CoopAbyssalDespawner original = new CoopAbyssalDespawner(system);
+        guestLocation = system;
+        original.updateGuestPresence(guest, false);
+        CoopAbyssalDespawner restored = savedCopy(original);
+        nowDays = 100f;
+
+        restored.updateGuestPresence(null, false);
+        restored.advance(CoopAbyssalDespawner.CHECK_INTERVAL_SECONDS);
+
+        assertFalse(restored.canDespawnNow(sector));
+        assertTrue(queuedSystems.isEmpty());
+        assertFalse(restored.isDone());
+    }
+
+    @Test
     void hostMustMeetBothNativeThresholdsIncludingTheirExactBoundaries() {
         CoopAbyssalDespawner script = solo();
         hostVisitDays = 9.999f;

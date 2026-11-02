@@ -1,7 +1,9 @@
 package com.fs.starfarer.api.impl.campaign.rulecmd;
 
+// COOP FORK BEGIN (0.98a-RC8): native light interaction bridge.
 import coop.ambient.CoopLightBridge;
 import coop.ambient.CoopLightDeferredEngagement;
+// COOP FORK END
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -266,15 +268,22 @@ public class DwellerCMD extends BaseCommandPlugin {
 	}
 
 
+	// COOP FORK BEGIN (0.98a-RC8): defer native combat until the shared claim is accepted.
 	protected boolean engageFleet(InteractionDialogAPI dialog, Map<String, MemoryAPI> memoryMap, MemoryAPI memory, DwellerStrength str, Random random) {
 		SectorEntityToken light = dialog.getInteractionTarget();
 		CampaignFleetAPI player = Global.getSector().getPlayerFleet();
-		if (CoopLightDeferredEngagement.deferIfNeeded(dialog, light, player,
-				() -> engageFleetNow(dialog, memoryMap, memory, str, random))) return true;
+		try {
+			if (CoopLightDeferredEngagement.deferIfNeeded(dialog, light, player,
+					() -> engageFleetNow(dialog, memoryMap, memory, str, random))) return true;
+		} catch (Throwable failure) {
+			CoopLightBridge.reportNativeFailure(CoopLightBridge.NativeHook.DWELLER_ENGAGEMENT, failure);
+			return false;
+		}
 		return engageFleetNow(dialog, memoryMap, memory, str, random);
 	}
 
 	protected boolean engageFleetNow(InteractionDialogAPI dialog, Map<String, MemoryAPI> memoryMap, MemoryAPI memory, DwellerStrength str, Random random) {
+	// COOP FORK END
 		CampaignFleetAPI fleet = createDwellerFleet(str, random);
 		if (fleet == null) return false;
 
@@ -283,8 +292,9 @@ public class DwellerCMD extends BaseCommandPlugin {
 
 		final SectorEntityToken entity = dialog.getInteractionTarget();
 
-		// This fleet exists only for the native light encounter, with no Host NPC counterpart.
+		// COOP FORK BEGIN (0.98a-RC8): native manifestation has no Host NPC counterpart.
 		CoopLightBridge.markEncounterFleet(fleet, entity);
+		// COOP FORK END
 
 		dialog.setInteractionTarget(fleet);
 
@@ -293,11 +303,15 @@ public class DwellerCMD extends BaseCommandPlugin {
 		FIDConfig config = new FIDConfig();
 
 		config.delegate = new BaseFIDDelegate() {
+			// COOP FORK BEGIN (0.98a-RC8): remove surviving manifestations on leaving the dialog.
 			@Override
 			public void notifyLeave(InteractionDialogAPI dialog) {
-				// Surviving manifestations belong to this dialogue, never to the shared NPC sim.
-				CoopLightBridge.discardEncounterFleet(fleet);
+				try { CoopLightBridge.discardEncounterFleet(fleet); }
+				catch (Throwable failure) {
+					CoopLightBridge.reportNativeFailure(CoopLightBridge.NativeHook.DWELLER_ENGAGEMENT, failure);
+				}
 			}
+			// COOP FORK END
 
 			public void postPlayerSalvageGeneration(InteractionDialogAPI dialog, FleetEncounterContext context, CargoAPI salvage) {
 				if (!(dialog.getInteractionTarget() instanceof CampaignFleetAPI)) return;

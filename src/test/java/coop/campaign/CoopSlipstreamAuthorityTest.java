@@ -2,6 +2,7 @@ package coop.campaign;
 
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
+import coop.testing.LogCapture;
 import coop.testing.RecordingNetService;
 import coop.testing.TestSessions;
 import org.junit.jupiter.api.Test;
@@ -343,6 +344,120 @@ class CoopSlipstreamAuthorityTest {
     }
 
     @Test
+    void nativeTrailCaptureClockChangesStayQuietAndResumeUsesTheLatestClock() {
+        Fixture f = new Fixture();
+        CoopSlipstreamRecord base = stream("trail", false);
+        var initial = new CoopSlipstreamRecord(base.hostId(), CoopSlipstreamRecord.Kind.TRAIL,
+                base.params(), base.terrainTags(), base.segments(), CoopSlipstreamRecord.Fade.idle(),
+                CoopSlipstreamRecord.Timeline.atOrigin(1_000L, false, true),
+                CoopSlipstreamRecord.SurgeWaveState.absent());
+        f.world.host = List.of(initial);
+        f.authority.tickHost();
+        f.net.sent.clear();
+
+        CoopSlipstreamRecord later = initial;
+        for (long time : List.of(250L, 500L, 750L)) {
+            later = withState(initial, initial.hostId(), initial.fade(), initial.segments(),
+                    initial.surgeWave(), CoopSlipstreamRecord.Timeline.atOrigin(1_000L + time,
+                            time == 500L, time != 750L));
+            f.world.host = List.of(later);
+            f.now.set(time);
+            f.authority.tickHost();
+            assertTrue(f.net.sent.isEmpty(), "capture time alone cannot republish a native trail");
+        }
+        assertEquals(List.of(initial), f.world.published);
+
+        f.authority.rearmFullBroadcast();
+        f.authority.tickHost();
+        assertEquals(List.of(CoopMessages.Type.STREAM_SET, CoopMessages.Type.STREAM_ADD), f.types());
+        assertEquals(later, CoopSlipstreamRecord.decode(
+                CoopMessages.requiredPayloadString(f.net.sent.get(1), "stream")));
+    }
+
+    @Test
+    void settledNativeTrailFaderChangesStillPublishWithoutGeometryChanges() {
+        Fixture f = new Fixture();
+        CoopSlipstreamRecord base = stream("trail", false);
+        var initial = new CoopSlipstreamRecord(base.hostId(), CoopSlipstreamRecord.Kind.TRAIL,
+                base.params(), base.terrainTags(), base.segments(), CoopSlipstreamRecord.Fade.idle(),
+                base.timeline(), CoopSlipstreamRecord.SurgeWaveState.absent());
+        f.world.host = List.of(initial);
+        f.authority.tickHost();
+        f.net.sent.clear();
+
+        List<CoopSlipstreamRecord.Segment> changed = new ArrayList<>(initial.segments());
+        var segment = changed.get(0);
+        var oldFader = segment.fader();
+        var fader = new CoopSlipstreamRecord.Fader(.75f, oldFader.durationIn(), oldFader.durationOut(),
+                CoopSlipstreamRecord.FaderState.IDLE, false, false);
+        changed.set(0, new CoopSlipstreamRecord.Segment(segment.x(), segment.y(), segment.width(),
+                segment.bMult(), fader));
+        var current = withState(initial, initial.hostId(), initial.fade(), changed, initial.surgeWave(),
+                CoopSlipstreamRecord.Timeline.atOrigin(2_000L, false, true));
+        f.world.host = List.of(current);
+        f.now.set(250L);
+        f.authority.tickHost();
+
+        assertEquals(List.of(CoopMessages.Type.STREAM_ADD), f.types());
+        assertEquals(current, CoopSlipstreamRecord.decode(
+                CoopMessages.requiredPayloadString(f.net.sent.get(0), "stream")));
+    }
+
+    @Test
+    void persistentSeasonalSweepFailureStopsAfterThreeSpacedAttemptsAndWarnsOnce() {
+        Fixture f = new Fixture();
+        f.world.sweepFailure = new IllegalStateException("unreadable native manager");
+        LogCapture log = LogCapture.attach(CoopSlipstreamAuthority.class);
+        try {
+            assertEquals(CoopSlipstreamAuthority.GuestSweepState.PENDING, f.authority.guestSweepState());
+            assertFalse(f.authority.guestSweepSettled());
+            for (long time : List.of(0L, 0L, 249L, 250L, 499L, 500L, 750L, 10_000L)) {
+                f.now.set(time);
+                assertDoesNotThrow(f.authority::prepareGuest);
+            }
+            assertEquals(3, f.world.calls.stream().filter("sweep"::equals).count());
+            assertEquals(CoopSlipstreamAuthority.GuestSweepState.DEGRADED, f.authority.guestSweepState());
+            assertTrue(f.authority.guestSweepSettled());
+            assertEquals(1, log.matching("Giving up seasonal slipstream cleanup").size());
+
+            f.authority.rearmFullBroadcast();
+            f.authority.applyAdd(stream("canonical", false).encode());
+            assertEquals(3, f.world.calls.stream().filter("sweep"::equals).count());
+            assertTrue(f.world.guest.containsKey("canonical"));
+
+            f.world.sweepFailure = null;
+            f.authority.reset();
+            assertFalse(f.authority.guestSweepSettled());
+            f.authority.prepareGuest();
+            assertEquals(4, f.world.calls.stream().filter("sweep"::equals).count());
+            assertEquals(CoopSlipstreamAuthority.GuestSweepState.COMPLETE, f.authority.guestSweepState());
+        } finally {
+            log.detach();
+        }
+    }
+
+    @Test
+    void aTransientSeasonalSweepFailureRecoversWithoutWarningOrRepeatingAfterResume() {
+        Fixture f = new Fixture();
+        f.world.sweepFailure = new IllegalStateException("temporarily unavailable");
+        LogCapture log = LogCapture.attach(CoopSlipstreamAuthority.class);
+        try {
+            f.authority.prepareGuest();
+            assertFalse(f.authority.guestSweepSettled());
+            f.world.sweepFailure = null;
+            f.now.set(CoopSlipstreamAuthority.GUEST_SWEEP_RETRY_INTERVAL_MILLIS);
+            f.authority.prepareGuest();
+            assertEquals(CoopSlipstreamAuthority.GuestSweepState.COMPLETE, f.authority.guestSweepState());
+            f.authority.rearmFullBroadcast();
+            f.authority.prepareGuest();
+            assertEquals(2, f.world.calls.stream().filter("sweep"::equals).count());
+            assertTrue(log.matching("Giving up seasonal slipstream cleanup").isEmpty());
+        } finally {
+            log.detach();
+        }
+    }
+
+    @Test
     void staleLifecycleMessagesAreHarmlessAndFreshSessionRearmsOnlyTheSweep() {
         Fixture f = new Fixture();
         CoopSlipstreamRecord.Fade fade = stream("expired", true).fade();
@@ -424,6 +539,7 @@ class CoopSlipstreamAuthorityTest {
         final List<String> localSurges = new ArrayList<>();
         final List<String> calls = new ArrayList<>();
         final List<CoopSlipstreamRecord> published = new ArrayList<>();
+        RuntimeException sweepFailure;
         @Override public List<CoopSlipstreamRecord> captureHost() { return host; }
         @Override public void published(CoopSlipstreamRecord record) { published.add(record); }
         @Override public Set<String> taggedIds() { return Set.copyOf(guest.keySet()); }
@@ -435,6 +551,9 @@ class CoopSlipstreamAuthorityTest {
             calls.add("despawn:" + record.hostId());
         }
         @Override public void remove(String id) { calls.add("remove:" + id); guest.remove(id); }
-        @Override public void sweepSeasonal() { calls.add("sweep"); }
+        @Override public void sweepSeasonal() {
+            calls.add("sweep");
+            if (sweepFailure != null) throw sweepFailure;
+        }
     }
 }

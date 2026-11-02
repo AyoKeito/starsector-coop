@@ -25,6 +25,12 @@ class CoopWreckAuthorityTest {
                 CoopMessages.Type.WRECK_ADD), f.types());
         assertEquals(List.of("wreck:a", "wreck:b"), CoopWreckRecord.decodeIds(
                 CoopMessages.requiredPayloadString(f.net.sent.get(0), "wrecks")));
+        assertTrue(f.net.sent.get(0).seq() < f.net.sent.get(1).seq());
+        assertTrue(f.net.sent.get(1).seq() < f.net.sent.get(2).seq(),
+                "manifest sequence must precede every record sequence in TCP send order");
+        Fixture guest = new Fixture();
+        f.net.sent.forEach(message -> applyLifecycle(guest.authority, message));
+        assertEquals(Set.of("wreck:a", "wreck:b"), guest.world.guest.keySet());
         f.net.sent.clear();
         f.world.host = List.of(wreck("b"));
         f.authority.rearmFullBroadcast();
@@ -44,7 +50,7 @@ class CoopWreckAuthorityTest {
         assertTrue(f.net.sent.isEmpty());
         f.world.host = List.of(); f.now.set(750); f.authority.tickHost();
         assertEquals(List.of(CoopMessages.Type.WRECK_REMOVE), f.types());
-        assertEquals(Set.of("wreck:a"), f.world.consumed);
+        assertTrue(f.world.consumed.isEmpty(), "natural Host disappearance is not a native consume");
     }
 
     @Test void hostPollIsBoundedAndUnchangedRecordsStayQuiet() {
@@ -84,7 +90,7 @@ class CoopWreckAuthorityTest {
         f.authority.applyAdd(wreck("a").encode());
         f.authority.applySet(ids()); f.authority.tickGuest();
         assertTrue(f.world.guest.isEmpty()); assertTrue(f.world.legacy.isEmpty());
-        assertTrue(f.net.sent.isEmpty()); assertEquals(Set.of("wreck:a"), f.world.consumed);
+        assertTrue(f.net.sent.isEmpty()); assertTrue(f.world.consumed.isEmpty());
     }
 
     @Test void localSalvageFadeWinsAgainstQueuedHostUpsertBeforeNativeRemoval() {
@@ -105,7 +111,7 @@ class CoopWreckAuthorityTest {
         assertEquals(List.of(CoopMessages.Type.WRECK_CONSUME), f.types());
         Fixture remote = new Fixture(); remote.authority.applyAdd(wreck("a").encode());
         remote.authority.applyRemove("wreck:a"); remote.authority.tickGuest();
-        assertTrue(remote.net.sent.isEmpty()); assertEquals(Set.of("wreck:a"), remote.world.consumed);
+        assertTrue(remote.net.sent.isEmpty()); assertTrue(remote.world.consumed.isEmpty());
     }
 
     @Test void savedConsumptionSurvivesControllerResetAndResumeWithoutResurrection() {
@@ -214,21 +220,75 @@ class CoopWreckAuthorityTest {
         assertEquals(1, ack.revision());
     }
 
-    @Test void hostDisappearanceOnThePeriodicFullBranchStillPersistsATombstone() {
+    @Test void hostDisappearanceOnThePeriodicFullBranchNeedsNoSavedConsumeGuard() {
         Fixture f = new Fixture();
         f.world.host = List.of(wreck("a")); f.authority.tickHost();
         f.world.host = List.of(); f.now.set(5_000); f.authority.tickHost();
-        assertEquals(Set.of("wreck:a"), f.world.consumed);
+        assertTrue(f.world.consumed.isEmpty());
     }
 
     @Test void completeGuestAbsenceIsTerminalForPendingPartialOutcomesToo() {
-        Fixture f = new Fixture(); f.authority.applyAdd(wreck("a").encode());
+        Fixture f = new Fixture(); f.authority.applyAdd(wreck("a").encode(), 0L, 1L);
         f.world.pending.add(new CoopWreckMutation("partial", 0, wreck("a")));
-        f.authority.applySet(ids());
-        assertEquals(Set.of("wreck:a"), f.world.consumed);
+        f.authority.applySet(ids(), 2L);
+        assertTrue(f.world.consumed.isEmpty());
         assertTrue(f.world.pending.isEmpty());
-        f.authority.applyAdd(wreck("a").encode());
+        f.authority.applyAdd(wreck("a").encode(), 0L, 1L);
         assertTrue(f.world.guest.isEmpty());
+    }
+
+    @Test void remoteRemovalRejectsStaleLifecycleMessagesButAllowsNewIncrementalWrecks() {
+        Fixture f = new Fixture();
+        f.authority.applyAdd(wreck("a").encode(), 0L, 10L);
+        f.authority.applyRemove("wreck:a", 12L);
+        f.authority.applyAdd(wreck("a").encode(), 0L, 11L);
+        assertTrue(f.world.guest.isEmpty());
+        assertTrue(f.world.consumed.isEmpty());
+
+        f.authority.applyAdd(wreck("new").encode(), 0L, 13L);
+        f.authority.applySet(ids(), 9L);
+        f.authority.applyRemove("wreck:new", 12L);
+        assertEquals(Set.of("wreck:new"), f.world.guest.keySet());
+        f.authority.rearmFullBroadcast();
+        f.authority.applyAdd(wreck("a").encode(), 0L, 11L);
+        assertEquals(Set.of("wreck:new"), f.world.guest.keySet(), "reconnect cannot erase the lifecycle floor");
+
+        f.authority.reset();
+        f.authority.applyAdd(wreck("next-session").encode(), 0L, 1L);
+        assertTrue(f.world.guest.containsKey("wreck:next-session"), "a new session gets its own sequence floor");
+    }
+
+    @Test void emptyManifestRejectsOldAddsAndNewIncrementalAddsStillMaterialize() {
+        Fixture f = new Fixture();
+        f.authority.applySet(ids(), 20L);
+        f.authority.applyAdd(wreck("old").encode(), 0L, 19L);
+        assertTrue(f.world.guest.isEmpty());
+        f.authority.applyAdd(wreck("new").encode(), 0L, 21L);
+        assertEquals(Set.of("wreck:new"), f.world.guest.keySet());
+        assertTrue(f.world.consumed.isEmpty());
+        assertThrows(IllegalArgumentException.class, () -> f.authority.applySet(ids(), -1L));
+    }
+
+    @Test void repeatedNaturalExpiryStaysOutOfBothSavedConsumeHistories() {
+        Fixture host = new Fixture(), guest = new Fixture();
+        for (int index = 0; index < 300; index++) {
+            host.world.host = List.of(wreck("expiry-" + index));
+            host.now.set(index * 500L);
+            host.authority.tickHost();
+            host.net.sent.forEach(message -> applyLifecycle(guest.authority, message));
+            host.net.sent.clear();
+
+            host.world.host = List.of();
+            host.now.addAndGet(250L);
+            host.authority.tickHost();
+            host.net.sent.forEach(message -> applyLifecycle(guest.authority, message));
+            host.net.sent.clear();
+            guest.authority.tickGuest();
+            assertTrue(guest.world.guest.isEmpty());
+        }
+        assertTrue(host.world.consumed.isEmpty());
+        assertTrue(guest.world.consumed.isEmpty());
+        assertTrue(guest.net.sent.isEmpty(), "remote expiry never becomes salvage replay");
     }
 
     @Test void perWreckRevisionTravelsWithItsAuthoritativeRecord() {
@@ -240,6 +300,15 @@ class CoopWreckAuthorityTest {
     }
 
     private static CoopWreckRecord wreck(String id) { return CoopWreckFixtures.sample("wreck:" + id); }
+    private static void applyLifecycle(CoopWreckAuthority authority, CoopMessages.Message message) {
+        switch (message.type()) {
+            case WRECK_SET -> authority.applySet(CoopMessages.requiredPayloadString(message, "wrecks"), message.seq());
+            case WRECK_ADD -> authority.applyAdd(CoopMessages.requiredPayloadString(message, "wreck"),
+                    CoopMessages.requiredPayloadLong(message, "revision"), message.seq());
+            case WRECK_REMOVE -> authority.applyRemove(CoopMessages.requiredPayloadString(message, "wreckId"), message.seq());
+            default -> fail("Unexpected lifecycle message " + message.type());
+        }
+    }
     private static String ids(String... ids) {
         return CoopWreckRecord.encodeIds(java.util.Arrays.stream(ids).map(x -> "wreck:" + x).toList());
     }

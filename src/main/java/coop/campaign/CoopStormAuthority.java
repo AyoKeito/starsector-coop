@@ -17,11 +17,14 @@ import java.util.function.LongSupplier;
 /** Transient transport cursors only; native World owns persisted grid and tracker checkpoints. */
 public final class CoopStormAuthority {
     public static final long SNAPSHOT_POLL_INTERVAL_MILLIS = 250L;
+    public static final long FULL_SNAPSHOT_INTERVAL_MILLIS = 5_000L;
     public static final int MAX_CONTROLS_PER_POLL = 4096;
 
     public interface World {
         /** Null means native terrain is unavailable, never an authoritative empty grid. */
         CoopStormSnapshot captureHost();
+        /** Refresh the absolute timer anchor for a periodic or resumed complete checkpoint. */
+        default CoopStormSnapshot captureHost(boolean forceCheckpoint) { return captureHost(); }
         /** Install a fully validated grid and complete tracker map atomically. */
         void applySnapshot(CoopStormSnapshot snapshot);
         void observeGuest();
@@ -39,7 +42,7 @@ public final class CoopStormAuthority {
     private final World world;
     private final CoopStormCodec.Assembler assembler = new CoopStormCodec.Assembler();
     private CoopStormSnapshot sent, desired;
-    private long nextHostPoll, nextGuestPoll;
+    private long nextHostPoll, nextGuestPoll, nextFullSnapshot;
     private boolean fullBroadcast = true, retryApply;
 
     public CoopStormAuthority(CoopNetService service, CoopSessionState session, LongSupplier clock, World world) {
@@ -54,10 +57,11 @@ public final class CoopStormAuthority {
         long now = clock.getAsLong();
         if (now < nextHostPoll) return;
         try {
-            CoopStormSnapshot current = world.captureHost();
+            boolean refresh = fullBroadcast || now >= nextFullSnapshot;
+            CoopStormSnapshot current = world.captureHost(refresh);
             if (current == null) return;
             validateOrder(current, sent);
-            if (!fullBroadcast && current.equals(sent)) return;
+            if (!refresh && current.equals(sent)) return;
             List<CoopMessages.Message> messages = new ArrayList<>();
             for (String encoded : CoopStormCodec.encodeSnapshotParts(current)) {
                 CoopMessages.Message message = fullBroadcast
@@ -66,6 +70,7 @@ public final class CoopStormAuthority {
                 requireFrame(message); messages.add(message);
             }
             messages.forEach(service::send); sent = current; fullBroadcast = false;
+            nextFullSnapshot = now + FULL_SNAPSHOT_INTERVAL_MILLIS;
         } finally { nextHostPoll = now + SNAPSHOT_POLL_INTERVAL_MILLIS; }
     }
 
@@ -150,7 +155,7 @@ public final class CoopStormAuthority {
     }
 
     public void rearmFullBroadcast() {
-        fullBroadcast = true; nextHostPoll = 0; nextGuestPoll = 0;
+        fullBroadcast = true; nextHostPoll = 0; nextGuestPoll = 0; nextFullSnapshot = 0;
         // Resume is a fresh publication boundary, while desired keeps same-session ordering.
         assembler.reset();
     }

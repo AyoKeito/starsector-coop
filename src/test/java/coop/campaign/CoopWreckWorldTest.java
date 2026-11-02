@@ -528,20 +528,39 @@ class CoopWreckWorldTest {
     }
 
     @Test
-    void lifetimeHistoryLimitNeverEvictsAnOldTombstone() {
+    void moreThanThirtyThreeThousandTrueConsumeGuardsRemainReadableAndCanGrow() {
         Fixture f = new Fixture();
         StringBuilder encoded = new StringBuilder("[");
-        for (int i = 0; i < CoopWreckWorld.MAX_CONSUMED_IDS; i++) {
+        for (int i = 0; i < 33_000; i++) {
             if (i != 0) encoded.append(',');
             encoded.append('"').append(CoopJson.escape("wreck:old-" + i)).append('"');
         }
         encoded.append(']');
-        String full = encoded.toString();
-        f.saved.put(CoopWreckWorld.CONSUMED_IDS, full);
+        f.saved.put(CoopWreckWorld.CONSUMED_IDS, encoded.toString());
+        Set<String> before = f.world.consumedIds();
+        assertEquals(33_000, before.size());
+        f.world.markConsumed("wreck:new");
+        assertEquals(33_001, f.world.consumedIds().size());
+        assertFalse(before.contains("wreck:new"), "previous immutable snapshots cannot change after a write");
+        assertTrue(f.world.consumedIds().contains("wreck:old-0"));
 
-        assertThrows(IllegalStateException.class, () -> f.world.markConsumed("wreck:new"));
-        assertSame(full, f.saved.get(CoopWreckWorld.CONSUMED_IDS));
-        assertEquals(CoopWreckWorld.MAX_CONSUMED_IDS, f.world.consumedIds().size());
+        CoopWreckWorld restored = new CoopWreckWorld(() -> f.sector, f.codec);
+        assertEquals(f.world.consumedIds(), restored.consumedIds());
+        f.add("older-host-save").tag("wreck:old-0");
+        assertTrue(restored.captureHost().isEmpty());
+        assertTrue(f.entities.isEmpty(), "a true native consume still blocks an old Host checkpoint");
+    }
+
+    @Test
+    void consumedHistoryAppendsToExistingWhitespaceFormattedJsonWithoutRewritingOldEntries() {
+        Fixture f = new Fixture();
+        f.saved.put(CoopWreckWorld.CONSUMED_IDS, " [ \"wreck:old\" ] \n");
+        Set<String> before = f.world.consumedIds();
+        f.world.markConsumed("wreck:new");
+        assertEquals(Set.of("wreck:old"), before);
+        assertEquals(Set.of("wreck:old", "wreck:new"), f.world.consumedIds());
+        CoopWreckWorld restored = new CoopWreckWorld(() -> f.sector, f.codec);
+        assertEquals(f.world.consumedIds(), restored.consumedIds());
     }
 
     private static CoopWreckRecord record(String id, String engineId) {

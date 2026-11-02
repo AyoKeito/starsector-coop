@@ -156,10 +156,15 @@ public final class CoopNpcFleetSuppressor {
      *                  in the frame is timed against
      */
     public void tick(SectorAPI sector, long nowMillis) {
+        tick(sector, nowMillis, true);
+    }
+
+    /** Keep sweeping fleets while a bounded seasonal membership read still needs its manager. */
+    public void tick(SectorAPI sector, long nowMillis, boolean allowSpawnerSuppression) {
         if (sector == null) {
             return;
         }
-        if (!spawnersSuppressed) {
+        if (!spawnersSuppressed && allowSpawnerSuppression) {
             try {
                 suppressSpawners(sector);
                 // Set inside the try: if suppression throws, the flag stays false and the next tick

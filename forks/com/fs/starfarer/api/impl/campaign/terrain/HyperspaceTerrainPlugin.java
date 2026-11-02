@@ -379,6 +379,12 @@ public class HyperspaceTerrainPlugin extends BaseTiledTerrain { // implements Ne
 		HyperspaceTerrainPlugin copy = (HyperspaceTerrainPlugin) super.writeReplace();
 		
 		clearCellsNotNearPlayer(copy);
+		// COOP FORK: Host timers may have advanced since the last published checkpoint.
+		// Persist that projection too, so adopting this save as Guest cannot advance them twice.
+		if (!CoopStormBridge.isGuest() && copy.coopSnapshotTimestamp != 0) {
+			copy.coopGuestElapsedDays = Math.max(0, Global.getSector().getClock()
+					.getElapsedDaysSince(copy.coopSnapshotTimestamp));
+		}
 		
 		copy.savedActiveCells = new ArrayList<CellStateTracker>();
 		for (int i = 0; i < copy.activeCells.length; i++) {
@@ -1487,6 +1493,7 @@ public class HyperspaceTerrainPlugin extends BaseTiledTerrain { // implements Ne
 						fleet.getStats().getFleetwideMaxBurnMod());
 				// COOP FORK: Host includes the Guest mirror in this shared phase mutation.
 				if (!CoopStormBridge.isGuest() && cell != null && cell.isSignaling() && cell.signal < 0.2f) {
+					if (cell.signal != 0f) coopLastCapture = null;
 					cell.signal = 0; // go to storm as soon as a fleet enters, if it's close to storming already
 				}
 				if (cell != null && cell.isStorming() && !Misc.isSlowMoving(fleet) && fleet.getBattle() == null) {
@@ -2011,6 +2018,11 @@ public class HyperspaceTerrainPlugin extends BaseTiledTerrain { // implements Ne
 
 	/** Absolute complete Host state, including carried trackers and forced native mutations. */
 	public CoopStormSnapshot coopCapture(long timestamp) {
+		return coopCapture(timestamp, false);
+	}
+
+	/** Timer-only advancement keeps its prior absolute anchor until a full resync is requested. */
+	public CoopStormSnapshot coopCapture(long timestamp, boolean forceCheckpoint) {
 		if (CoopStormBridge.isGuest()) throw new IllegalStateException("Guest cannot capture authoritative storms");
 		coopCullAllOutsideViewers();
 		List<CoopStormSnapshot.Tracker> trackers = new ArrayList<CoopStormSnapshot.Tracker>();
@@ -2029,17 +2041,28 @@ public class HyperspaceTerrainPlugin extends BaseTiledTerrain { // implements Ne
 			coopEncodedSource = nativeGrid; coopEncodedGeneration = generation;
 		}
 		float intervalDays = auto.getInterval().getIntervalDuration();
-		if (coopLastCapture != null && coopLastCapture.generation() == generation
+		if (!forceCheckpoint && coopLastCapture != null && coopLastCapture.generation() == generation
 				&& coopLastCapture.commitTimestamp() == coopCommitTimestamp
-				&& coopLastCapture.snapshotTimestamp() == timestamp
 				&& coopLastCapture.intervalDurationDays() == intervalDays
 				&& coopLastCapture.encodedCells().equals(coopEncodedGrid)
-				&& coopLastCapture.trackers().equals(trackers)) return coopLastCapture;
+				&& coopSameTrackerEvents(coopLastCapture.trackers(), trackers)) return coopLastCapture;
 		coopRevision = Math.addExact(coopRevision, 1L);
-		coopSnapshotTimestamp = timestamp;
+		coopSnapshotTimestamp = timestamp; coopGuestElapsedDays = 0f;
 		coopLastCapture = new CoopStormSnapshot(coopRevision, generation, coopCommitTimestamp, timestamp,
 				intervalDays, nativeGrid.length, nativeGrid[0].length, coopEncodedGrid, trackers);
 		return coopLastCapture;
+	}
+
+	private static boolean coopSameTrackerEvents(List<CoopStormSnapshot.Tracker> before,
+			List<CoopStormSnapshot.Tracker> after) {
+		if (before.size() != after.size()) return false;
+		for (int i = 0; i < before.size(); i++) {
+			CoopStormSnapshot.Tracker a = before.get(i), b = after.get(i);
+			if (a.i() != b.i() || a.j() != b.j() || a.epoch() != b.epoch() || a.state() != b.state()
+					|| a.maxSignal() != b.maxSignal() || a.maxWane() != b.maxWane()
+					|| a.timeScale() != b.timeScale()) return false;
+		}
+		return true;
 	}
 
 	/** Does not replay native random initialization, local culling, or private weather generation. */
@@ -2231,6 +2254,8 @@ public class HyperspaceTerrainPlugin extends BaseTiledTerrain { // implements Ne
 							} else {
 								cell.maxWane = dur * 4f;
 							}
+							// COOP FORK: forced timer changes need a fresh anchor even within the same phase.
+							if (cell.wane != dur) coopLastCapture = null;
 							cell.wane = dur;
 							cell.state = CellState.STORM_WANE;
 						} else {
@@ -2239,10 +2264,14 @@ public class HyperspaceTerrainPlugin extends BaseTiledTerrain { // implements Ne
 					} else if (cell != null) {
 						cell.state = state;
 						if (state == CellState.WAIT) {
+							// COOP FORK: a forced WAIT reset is not predictable timer advancement.
+							if (cell.wait != wait) coopLastCapture = null;
 							cell.wait = wait;
 						}
 						if (state == CellState.SIGNAL) {
 							//signal = Math.min(cell.signal, signal);
+							// COOP FORK: a same-phase SIGNAL reset also needs its new timer anchor.
+							if (cell.signal != signal) coopLastCapture = null;
 							cell.signal = signal;
 							cell.maxSignal = signal;
 						}

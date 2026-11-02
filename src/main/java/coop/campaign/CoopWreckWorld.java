@@ -37,13 +37,13 @@ public final class CoopWreckWorld implements CoopWreckAuthority.WreckWorld {
     public static final String TRAP_ATTEMPT = "$coopWreckTrapAttempt";
     public static final String INTERACTION = "$coopWreckInteraction";
     static final int MAX_PENDING_MUTATIONS = 1024;
-    static final int MAX_CONSUMED_IDS = 32_768;
     private static final int MAX_SAVED_CHARACTERS = 16 * 1024 * 1024;
 
     private final Supplier<SectorAPI> sectorSupplier;
     private final NativeCodec codec;
     private SectorAPI cachedSector;
     private String cachedConsumedText;
+    private Set<String> cachedConsumedMutable = new LinkedHashSet<>();
     private Set<String> cachedConsumed = Set.of();
 
     interface NativeCodec {
@@ -422,23 +422,36 @@ public final class CoopWreckWorld implements CoopWreckAuthority.WreckWorld {
 
     @Override
     public Set<String> consumedIds() {
+        loadConsumed();
+        if (cachedConsumed == null) {
+            cachedConsumed = Collections.unmodifiableSet(new LinkedHashSet<>(cachedConsumedMutable));
+        }
+        return cachedConsumed;
+    }
+
+    private void loadConsumed() {
         SectorAPI sector = sectorSupplier.get();
-        if (sector == null) return Set.of();
+        if (sector == null) {
+            cachedSector = null;
+            cachedConsumedText = null;
+            cachedConsumedMutable = new LinkedHashSet<>();
+            cachedConsumed = Set.of();
+            return;
+        }
         Object saved = sector.getMemoryWithoutUpdate().get(CONSUMED_IDS);
         if (saved == null) {
             cachedSector = sector;
             cachedConsumedText = null;
+            cachedConsumedMutable = new LinkedHashSet<>();
             cachedConsumed = Set.of();
-            return cachedConsumed;
+            return;
         }
         if (!(saved instanceof String encoded)) {
             throw new IllegalStateException("Saved wreck consumption state is not text");
         }
-        if (cachedSector == sector && encoded.equals(cachedConsumedText)) return cachedConsumed;
-        if (encoded.length() > MAX_SAVED_CHARACTERS) throw new IllegalStateException("Saved wreck consumption state is too large");
+        if (cachedSector == sector && encoded.equals(cachedConsumedText)) return;
         Object decoded = CoopJson.parse(encoded);
         if (!(decoded instanceof List<?> rows)) throw new IllegalStateException("Saved wreck consumption state is not an array");
-        if (rows.size() > MAX_CONSUMED_IDS) throw new IllegalStateException("Too many consumed wreck ids");
         Set<String> ids = new LinkedHashSet<>();
         for (Object row : rows) {
             if (!(row instanceof String id)) throw new IllegalStateException("Saved consumed wreck id is not text");
@@ -447,33 +460,28 @@ public final class CoopWreckWorld implements CoopWreckAuthority.WreckWorld {
         }
         cachedSector = sector;
         cachedConsumedText = encoded;
-        cachedConsumed = Collections.unmodifiableSet(ids);
-        return cachedConsumed;
+        cachedConsumedMutable = ids;
+        cachedConsumed = null;
     }
 
     @Override
     public void markConsumed(String id) {
         requireId(id);
-        Set<String> ids = new LinkedHashSet<>(consumedIds());
-        if (!ids.add(id)) return;
-        if (ids.size() > MAX_CONSUMED_IDS) {
-            throw new IllegalStateException("Consumed wreck id limit reached; refusing to forget tombstones");
-        }
-        List<String> sorted = new ArrayList<>(ids);
-        Collections.sort(sorted);
-        StringBuilder encoded = new StringBuilder("[");
-        for (String value : sorted) {
-            if (encoded.length() > 1) encoded.append(',');
-            encoded.append('"').append(CoopJson.escape(value)).append('"');
-        }
-        encoded.append(']');
-        if (encoded.length() > MAX_SAVED_CHARACTERS) throw new IllegalStateException("Saved wreck consumption state is too large");
+        loadConsumed();
+        if (cachedConsumedMutable.contains(id)) return;
+        // Keep the saved JSON array compatible while appending only the new guard. Ordinary expiry
+        // no longer enters this history; actual native consumes still survive an older Host save.
+        StringBuilder encoded = new StringBuilder(cachedConsumedText == null ? "["
+                : cachedConsumedText.substring(0, cachedConsumedText.lastIndexOf(']')));
+        if (!cachedConsumedMutable.isEmpty()) encoded.append(',');
+        encoded.append('"').append(CoopJson.escape(id)).append("\"]");
         SectorAPI sector = Objects.requireNonNull(sectorSupplier.get(), "No sector for wreck consumption");
         String saved = encoded.toString();
         sector.getMemoryWithoutUpdate().set(CONSUMED_IDS, saved);
         cachedSector = sector;
         cachedConsumedText = saved;
-        cachedConsumed = Collections.unmodifiableSet(ids);
+        cachedConsumedMutable.add(id);
+        cachedConsumed = null;
     }
 
     /** Canonical ids never resolve through the engine's unrelated per-client entity counter. */

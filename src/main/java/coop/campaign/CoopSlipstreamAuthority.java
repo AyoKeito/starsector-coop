@@ -16,6 +16,10 @@ import java.util.function.LongSupplier;
 /** Host-owned hyperspace terrain, including native Leviathan trail checkpoints. */
 public final class CoopSlipstreamAuthority {
     static final long HOST_POLL_INTERVAL_MILLIS = 250L;
+    static final long GUEST_SWEEP_RETRY_INTERVAL_MILLIS = 250L;
+    static final int MAX_GUEST_SWEEP_ATTEMPTS = 3;
+
+    public enum GuestSweepState { PENDING, COMPLETE, DEGRADED }
 
     /** Engine seam; saved terrain tags, rather than transport state, identify guest replicas. */
     public interface StreamWorld {
@@ -39,7 +43,9 @@ public final class CoopSlipstreamAuthority {
     private final Set<String> oversizeWarnings = new java.util.HashSet<>();
     private long nextHostPollAtMillis;
     private boolean fullBroadcast = true;
-    private boolean seasonalSwept;
+    private GuestSweepState guestSweepState = GuestSweepState.PENDING;
+    private int guestSweepAttempts;
+    private long nextGuestSweepAtMillis;
 
     public CoopSlipstreamAuthority(CoopNetService service, CoopSessionState session,
                                    LongSupplier clockMillis) {
@@ -94,7 +100,7 @@ public final class CoopSlipstreamAuthority {
             } else {
                 for (CoopSlipstreamRecord record : current.values()) {
                     CoopSlipstreamRecord previous = known.get(record.hostId());
-                    if (previous == null || record.kind() == CoopSlipstreamRecord.Kind.TRAIL && !record.equals(previous)
+                    if (previous == null || record.kind() == CoopSlipstreamRecord.Kind.TRAIL && !sameTrailContent(record, previous)
                             || despawnChanged(previous, record)
                             || activeTransition(record) || activeTransition(previous)) {
                         // A full checkpoint keeps native counters, live faders and surge cursor on
@@ -118,6 +124,18 @@ public final class CoopSlipstreamAuthority {
         } finally {
             nextHostPollAtMillis = now + HOST_POLL_INTERVAL_MILLIS;
         }
+    }
+
+    /** A native trail's capture clock changes even when none of its native fields changed. */
+    private static boolean sameTrailContent(CoopSlipstreamRecord current, CoopSlipstreamRecord previous) {
+        return current.version() == previous.version()
+                && current.hostId().equals(previous.hostId())
+                && current.kind() == previous.kind()
+                && current.params().equals(previous.params())
+                && current.terrainTags().equals(previous.terrainTags())
+                && current.segments().equals(previous.segments())
+                && current.fade().equals(previous.fade())
+                && current.surgeWave().equals(previous.surgeWave());
     }
 
     private static boolean activeTransition(CoopSlipstreamRecord record) {
@@ -154,9 +172,32 @@ public final class CoopSlipstreamAuthority {
     }
 
     public void prepareGuest() {
-        if (seasonalSwept) return;
-        world.sweepSeasonal();
-        seasonalSwept = true;
+        if (guestSweepSettled()) return;
+        long now = clockMillis.getAsLong();
+        if (now < nextGuestSweepAtMillis) return;
+        guestSweepAttempts++;
+        try {
+            world.sweepSeasonal();
+            guestSweepState = GuestSweepState.COMPLETE;
+        } catch (RuntimeException | LinkageError failure) {
+            if (guestSweepAttempts >= MAX_GUEST_SWEEP_ATTEMPTS) {
+                guestSweepState = GuestSweepState.DEGRADED;
+                CoopLog.warn(CoopSlipstreamAuthority.class,
+                        "Giving up seasonal slipstream cleanup after " + guestSweepAttempts
+                                + " attempts; continuing NPC replication", failure);
+            } else {
+                nextGuestSweepAtMillis = now + GUEST_SWEEP_RETRY_INTERVAL_MILLIS;
+            }
+        }
+    }
+
+    public GuestSweepState guestSweepState() {
+        return guestSweepState;
+    }
+
+    /** Manager suppression may proceed after successful cleanup or a bounded degraded fallback. */
+    public boolean guestSweepSettled() {
+        return guestSweepState != GuestSweepState.PENDING;
     }
 
     public void applySet(String encoded) {
@@ -193,7 +234,9 @@ public final class CoopSlipstreamAuthority {
     public void reset() {
         known.clear();
         oversizeWarnings.clear();
-        seasonalSwept = false;
+        guestSweepState = GuestSweepState.PENDING;
+        guestSweepAttempts = 0;
+        nextGuestSweepAtMillis = 0;
         rearmFullBroadcast();
     }
 }

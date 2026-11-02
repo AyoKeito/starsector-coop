@@ -26,8 +26,12 @@ import coop.storm.CoopStormBridge;
 import coop.storm.CoopStormControl;
 import coop.storm.CoopStormGrid;
 import coop.storm.CoopStormSnapshot;
+import coop.net.CoopConnectionRole;
+import coop.net.CoopMessages;
 import coop.testing.ApiProxies;
 import coop.testing.ProxyDefaults;
+import coop.testing.RecordingNetService;
+import coop.testing.TestSessions;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -42,6 +46,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -182,6 +187,85 @@ class CoopStormNativeTest {
         assertSame(before.encodedCells(), changed.encodedCells(), "No grid deflate while generation is unchanged");
         assertEquals(2, changed.trackers().get(0).state());
         assertSame(changed, s.terrain.coopCapture(100));
+    }
+
+    @Test void nativeTimerAdvancementStaysQuietUntilPhaseChangeOrAbsoluteRefresh() {
+        Scene s = new Scene(4, 4); installHost(s, 0, 1);
+        s.terrain.put(2, 2, 10, 5); s.terrain.step(0);
+        CoopStormSnapshot before = s.terrain.coopCapture(100);
+        s.terrain.step(0.25f);
+        assertSame(before, s.terrain.coopCapture(101), "Clock and WAIT countdown are locally projectable");
+        CoopStormSnapshot refresh = s.terrain.coopCapture(102, true);
+        assertEquals(before.revision() + 1, refresh.revision());
+        assertEquals(102, refresh.snapshotTimestamp()); assertEquals(9.75f, refresh.trackers().get(0).waitDays());
+        s.terrain.step(10f);
+        CoopStormSnapshot phase = s.terrain.coopCapture(103);
+        assertEquals(refresh.revision() + 1, phase.revision());
+        assertEquals(HyperspaceTerrainPlugin.CellState.SIGNAL.ordinal(), phase.trackers().get(0).state());
+    }
+
+    @Test void forcedWaitAndWaneTimerChangesPublishEvenWhenPhaseAndMaximaStayEqual() {
+        Scene s = new Scene(4, 4); installHost(s, 0, 1);
+        s.terrain.setTileState(new Vector2f(), 1000, HyperspaceTerrainPlugin.CellState.WAIT, 10, 5);
+        s.terrain.step(0);
+        CoopStormSnapshot before = s.terrain.coopCapture(100);
+        s.terrain.setTileState(new Vector2f(), 1000, HyperspaceTerrainPlugin.CellState.WAIT, 20, 5);
+        CoopStormSnapshot reset = s.terrain.coopCapture(100);
+        assertEquals(before.revision() + 1, reset.revision());
+        assertEquals(before.trackers().get(0).state(), reset.trackers().get(0).state());
+        assertTrue(reset.trackers().get(0).waitDays() > 10);
+        for (var column : s.terrain.getActiveCells()) for (var cell : column) cell.wane(4);
+        CoopStormSnapshot waning = s.terrain.coopCapture(100);
+        s.terrain.setTileState(new Vector2f(), 1000, HyperspaceTerrainPlugin.CellState.OFF, 0, -1);
+        CoopStormSnapshot shortened = s.terrain.coopCapture(100);
+        assertEquals(waning.revision() + 1, shortened.revision());
+        assertEquals(waning.trackers().get(0).state(), shortened.trackers().get(0).state());
+        assertEquals(waning.trackers().get(0).maxWane(), shortened.trackers().get(0).maxWane());
+        assertEquals(0f, shortened.trackers().get(0).wane());
+    }
+
+    @Test void membershipEpochMaximaRateAndAutomatonCommitsStillProduceFreshCheckpoints() {
+        Scene s = new Scene(4, 4); installHost(s, 0, 1);
+        s.terrain.put(2, 2, 10, 5); s.terrain.step(0);
+        CoopStormSnapshot previous = s.terrain.coopCapture(100);
+        s.terrain.getActiveCells()[2][2].coopTimeScale = 5;
+        CoopStormSnapshot changed = s.terrain.coopCapture(101);
+        assertEquals(previous.revision() + 1, changed.revision()); assertEquals(5f, changed.trackers().get(0).timeScale());
+        s.terrain.getActiveCells()[2][2].coopEpoch++;
+        previous = changed; changed = s.terrain.coopCapture(102);
+        assertEquals(previous.revision() + 1, changed.revision());
+        s.terrain.put(1, 1, 10, 5);
+        previous = changed; changed = s.terrain.coopCapture(103);
+        assertEquals(previous.revision() + 1, changed.revision()); assertEquals(2, changed.trackers().size());
+        s.terrain.getActiveCells()[2][2].wane(4);
+        previous = s.terrain.coopCapture(104); s.terrain.getActiveCells()[2][2].wane(8);
+        changed = s.terrain.coopCapture(105);
+        assertEquals(previous.revision() + 1, changed.revision());
+        s.terrain.nextGeneration(); previous = changed; changed = s.terrain.coopCapture(106);
+        assertEquals(previous.revision() + 1, changed.revision()); assertTrue(changed.generation() > previous.generation());
+        s.terrain.getActiveCells()[1][1] = null;
+        previous = changed; changed = s.terrain.coopCapture(107);
+        assertEquals(previous.revision() + 1, changed.revision()); assertEquals(1, changed.trackers().size());
+    }
+
+    @Test void hostPublicationCombinesQuietTimersImmediateNativeChangesAndPeriodicRefresh() {
+        Scene s = new Scene(4, 4);
+        CoopStormWorld world = new CoopStormWorld(() -> s.sector); world.install(new Object(), false, () -> s.remote);
+        s.terrain.put(2, 2, 10, 5); s.terrain.step(0);
+        AtomicLong now = new AtomicLong();
+        RecordingNetService net = new RecordingNetService(CoopConnectionRole.HOST);
+        CoopStormAuthority authority = new CoopStormAuthority(net, TestSessions.activeHostSession(), now::get, world);
+        authority.tickHost();
+        s.terrain.step(0.25f); s.timestamp++; now.set(250); authority.tickHost();
+        assertEquals(1, net.sent.size(), "Advancing clocks and timers do not send a full grid");
+        now.set(CoopStormAuthority.FULL_SNAPSHOT_INTERVAL_MILLIS); authority.tickHost();
+        assertEquals(2, net.sent.size());
+        CoopStormSnapshot refreshed = CoopStormCodec.decodeSnapshot(CoopMessages.requiredPayloadString(net.sent.get(1), "storm"));
+        assertEquals(s.timestamp, refreshed.snapshotTimestamp()); assertEquals(9.75f, refreshed.trackers().get(0).waitDays());
+        s.terrain.setTileState(new Vector2f(), 1000, HyperspaceTerrainPlugin.CellState.SIGNAL, 0, 5);
+        now.addAndGet(250); authority.tickHost();
+        assertEquals(3, net.sent.size(), "Native control mutations publish on the next poll");
+        assertEquals(CoopMessages.Type.STORM_GRID, net.sent.get(2).type());
     }
 
     @Test void mirrorsNeverReceiveNativeStrikeBoostOrDamage() {
@@ -510,6 +594,20 @@ class CoopStormNativeTest {
         assertEquals(0.5f, restored.getActiveCells()[1][1].signal, "A fresh baseline resets the saved projection cursor");
     }
 
+    @Test void realXStreamHostSaveAdoptedAsGuestRetainsUnpublishedTimerProgress() throws Exception {
+        Scene s = new Scene(4, 4); installHost(s, 0, 1);
+        s.terrain.put(2, 2, 10, 5); s.terrain.step(0);
+        CoopStormSnapshot published = s.terrain.coopCapture(100);
+        s.terrain.step(0.25f); s.elapsedDays = 0.25f; s.timestamp = 101;
+        assertSame(published, s.terrain.coopCapture(s.timestamp));
+        XStream stream = nativeStream(s); String xml = stream.toXML(nativeCopy(s.terrain));
+        CoopStormBridge.configureGuest(true);
+        HyperspaceTerrainPlugin restored = (HyperspaceTerrainPlugin) stream.fromXML(xml);
+        restored.coopObserveGuest(); assertEquals(9.75f, restored.getActiveCells()[2][2].wait);
+        s.elapsedDays = 0.5f; restored.coopObserveGuest();
+        assertEquals(9.5f, restored.getActiveCells()[2][2].wait);
+    }
+
     private static String withoutCoopFields(String xml) {
         return xml.replaceAll("(?s)\\s*<(coop[A-Za-z]+)>.*?</\\1>", "");
     }
@@ -605,6 +703,7 @@ class CoopStormNativeTest {
             entity = stub(SectorEntityToken.class, (name, args) -> name.equals("getLocation") ? new Vector2f() : null);
         }
         int[][] grid() { return auto.getCells(); }
+        void nextGeneration() { auto.advance(3f); }
         void put(int i, int j, float wait, float signal) { activeCells[i][j] = new CellStateTracker(i, j, wait, signal); }
         void step(float days) { coopAdvanceShared(days); }
         void strike(CampaignFleetAPI fleet) { applyStormStrikes(new CellStateTracker(0, 0, 0, 0), fleet, 1); }

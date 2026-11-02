@@ -717,9 +717,6 @@ public class CoopNetPump implements EveryFrameScript {
     private String lightBridgeSessionId;
     private Object lightBridgeOwner;
     private final CoopLightMessageHold lightMessageHold = new CoopLightMessageHold();
-    private static final int MAX_LIGHT_CLAIM_OBSERVATIONS = 128;
-    private final ArrayDeque<java.util.Map<String, Object>> lightClaimObservations = new ArrayDeque<>();
-    private long lightClaimObservationsEvicted;
     private CoopLightAuthority lightAuthority;
     /**
      * Session-scoped, not link-scoped: true from the first connect of a co-op session until that
@@ -1185,9 +1182,7 @@ public class CoopNetPump implements EveryFrameScript {
         out.put("selectedLightId", nullToEmpty(lightId));
         out.put("selectedToken", lightId == null ? "" : nullToEmpty(lightClaimTokenForProbe(lightId)));
         out.put("holderPlayerId", lightId == null ? "" : nullToEmpty(interactionGate.holderOf(lightId)));
-        out.put("observations", java.util.List.copyOf(lightClaimObservations));
-        out.put("maxObservations", MAX_LIGHT_CLAIM_OBSERVATIONS);
-        out.put("evictedObservations", lightClaimObservationsEvicted);
+        out.putAll(lightMessageHold.claimObservations());
         return java.util.Map.copyOf(out);
     }
 
@@ -1249,20 +1244,8 @@ public class CoopNetPump implements EveryFrameScript {
         if (!CoopDebug.diagnosticsEnabled()) return;
         String entityId = CoopMessages.requiredPayloadString(message, "entityId");
         if (!coop.ambient.CoopLightBridge.isCanonicalId(entityId)) return;
-        java.util.Map<String, Object> row = new java.util.LinkedHashMap<>();
-        row.put("atMillis", clockMillis.getAsLong()); row.put("direction", direction);
-        row.put("type", message.type().name()); row.put("sessionId", nullToEmpty(message.sessionId()));
-        row.put("lightId", entityId); row.put("token", nullToEmpty(CoopMessages.interactionLightClaimToken(message)));
-        row.put("currentToken", nullToEmpty(lightClaimTokenForProbe(entityId))); row.put("matched", matched);
-        row.put("seq", message.seq());
-        if (message.type() == CoopMessages.Type.INTERACTION_ACCEPT) {
-            row.put("playerId", CoopMessages.requiredPayloadString(message, "playerId"));
-            row.put("hostSeq", CoopMessages.payload(message).requiredLong("hostSeq"));
-        } else row.put("reason", CoopMessages.requiredPayloadString(message, "reason"));
-        if (lightClaimObservations.size() == MAX_LIGHT_CLAIM_OBSERVATIONS) {
-            lightClaimObservations.removeFirst(); lightClaimObservationsEvicted++;
-        }
-        lightClaimObservations.addLast(java.util.Map.copyOf(row));
+        lightMessageHold.observeClaimReply(direction, message, matched,
+                lightClaimTokenForProbe(entityId), clockMillis.getAsLong());
     }
 
     private static String nullToEmpty(String value) { return value == null ? "" : value; }
@@ -3647,7 +3630,8 @@ public class CoopNetPump implements EveryFrameScript {
         tickNetFault();
         // Seasonal membership must be read before NPC suppression removes SlipstreamManager.
         syncEncounterReplication();
-        if (syncSlipstreamReplication()) syncNpcReplication();
+        syncSlipstreamReplication();
+        syncNpcReplication();
         syncWreckReplication();
         syncLightReplication();
         syncStormReplication();
@@ -7998,7 +7982,8 @@ public class CoopNetPump implements EveryFrameScript {
                 npcFleetReplicator.tick();
             } else if (CoopNpcFleetSuppressor.activeForRole(service.role())) {
                 long suppressorStart = profiler.start();
-                npcFleetSuppressor.tick(Global.getSector(), clockMillis.getAsLong());
+                npcFleetSuppressor.tick(Global.getSector(), clockMillis.getAsLong(),
+                        slipstreamAuthority.guestSweepSettled());
                 profiler.record(SECTION_NPC_SUPPRESSOR, suppressorStart);
             }
             maybeDumpNpcDiagnostics();
@@ -8103,6 +8088,9 @@ public class CoopNetPump implements EveryFrameScript {
                 encounterAuthority.updateGuestPresence(reconnect.active());
                 if (active) encounterAuthority.tickHost();
                 else encounterAuthority.observeHost();
+            } else if (service.role() == CoopConnectionRole.NONE) {
+                // A canonical save may be played solo after Host capture replaced native lifetimes.
+                encounterAuthority.updateGuestPresence(false);
             } else if (active && service.role() == CoopConnectionRole.GUEST) {
                 encounterAuthority.tickGuest();
             }
@@ -8128,7 +8116,7 @@ public class CoopNetPump implements EveryFrameScript {
         }
     }
 
-    private boolean syncSlipstreamReplication() {
+    private void syncSlipstreamReplication() {
         boolean active = shouldStreamFleet();
         if (active && !slipstreamReplicationStreaming) {
             slipstreamAuthority.reset();
@@ -8136,7 +8124,7 @@ public class CoopNetPump implements EveryFrameScript {
         } else if (!active && slipstreamReplicationStreaming && !reconnect.active()) {
             slipstreamReplicationStreaming = false;
         }
-        if (!active) return true;
+        if (!active) return;
         try {
             if (service.role() == CoopConnectionRole.HOST) {
                 slipstreamAuthority.tickHost();
@@ -8145,10 +8133,7 @@ public class CoopNetPump implements EveryFrameScript {
             }
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopNetPump.class, "Failed to sync host slipstreams", ex);
-            // Keep the manager available for a retry of its membership sweep.
-            return service.role() != CoopConnectionRole.GUEST;
         }
-        return true;
     }
 
     private void syncWreckReplication() {
@@ -8188,10 +8173,10 @@ public class CoopNetPump implements EveryFrameScript {
                 wreckReplicationStreaming = true;
             }
             switch (message.type()) {
-                case WRECK_SET -> wreckAuthority.applySet(CoopMessages.requiredPayloadString(message, "wrecks"));
+                case WRECK_SET -> wreckAuthority.applySet(CoopMessages.requiredPayloadString(message, "wrecks"), message.seq());
                 case WRECK_ADD -> wreckAuthority.applyAdd(CoopMessages.requiredPayloadString(message, "wreck"),
-                        CoopMessages.optionalPayloadLong(message, "revision", 0));
-                case WRECK_REMOVE -> wreckAuthority.applyRemove(CoopMessages.requiredPayloadString(message, "wreckId"));
+                        CoopMessages.optionalPayloadLong(message, "revision", 0), message.seq());
+                case WRECK_REMOVE -> wreckAuthority.applyRemove(CoopMessages.requiredPayloadString(message, "wreckId"), message.seq());
                 case WRECK_CONSUME -> wreckAuthority.applyConsume(CoopMessages.requiredPayloadString(message, "wrecks"));
                 case WRECK_MUTATION -> wreckAuthority.applyMutation(CoopMessages.requiredPayloadString(message, "mutation"));
                 case WRECK_MUTATION_ACK -> wreckAuthority.applyMutationAck(CoopMessages.requiredPayloadString(message, "ack"));
@@ -8300,7 +8285,7 @@ public class CoopNetPump implements EveryFrameScript {
                 lightReplicationStreaming = true;
             }
             switch (message.type()) {
-                case LIGHT_SET -> lightAuthority.applySet(CoopMessages.requiredPayloadString(message, "lights"));
+                case LIGHT_SET -> lightAuthority.applySet(CoopMessages.requiredPayloadString(message, "lights"), message.seq());
                 case LIGHT_REQUEST -> lightAuthority.applyRequest(
                         CoopMessages.requiredPayloadString(message, "request"), sessionState.remotePlayerId());
                 case LIGHT_RESULT -> lightAuthority.applyResult(CoopMessages.requiredPayloadString(message, "result"));
@@ -10512,6 +10497,7 @@ public class CoopNetPump implements EveryFrameScript {
                 || type == CoopMessages.Type.NPC_FLEET_MOTION
                 || type == CoopMessages.Type.STORM_GRID
                 || type == CoopMessages.Type.STORM_CONTROL
+                || type == CoopMessages.Type.STREAM_ADD
                 || type == CoopMessages.Type.BATTLE_STATUS;
     }
 }

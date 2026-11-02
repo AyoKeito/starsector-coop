@@ -117,11 +117,15 @@ public final class CoopStormWorld implements CoopStormAuthority.World {
     }
 
     @Override public CoopStormSnapshot captureHost() {
+        return captureHost(false);
+    }
+
+    @Override public CoopStormSnapshot captureHost(boolean forceCheckpoint) {
         if (guest) throw new IllegalStateException("Guest cannot publish authoritative storms");
         HyperspaceTerrainPlugin plugin = pluginOrNull();
         if (plugin == null) return null;
         if (remoteFleetSupplier.get() == null) return null;
-        CoopStormSnapshot snapshot = plugin.coopCapture(installedSector.getClock().getTimestamp());
+        CoopStormSnapshot snapshot = plugin.coopCapture(installedSector.getClock().getTimestamp(), forceCheckpoint);
         latestRevision = snapshot.revision();
         return snapshot;
     }

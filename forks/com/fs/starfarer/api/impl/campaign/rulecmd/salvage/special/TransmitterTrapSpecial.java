@@ -107,8 +107,8 @@ public class TransmitterTrapSpecial extends BaseSalvageSpecial {
 	}
 	
 	
+	// COOP FORK BEGIN (0.98a-RC8): Host owns managed wreck alarms; extracted native logic targets either player.
 	public void transmitterActivated() {
-		// COOP: the host owns fleets created or redirected by a managed wreck's alarm.
 		if (coop.ambient.CoopWreckBridge.isGuestReplica(entity)) {
 			entity.getMemoryWithoutUpdate().set("$coopWreckTrapActivated", true);
 			return;
@@ -238,6 +238,7 @@ public class TransmitterTrapSpecial extends BaseSalvageSpecial {
 			return;
 		}
 	}
+	// COOP FORK END
 	
 	
 	
@@ -245,6 +246,7 @@ public class TransmitterTrapSpecial extends BaseSalvageSpecial {
 	public static void makeFleetInterceptPlayer(CampaignFleetAPI fleet, boolean makeAggressive, boolean makeLowRepImpact, float interceptDays) {
 		makeFleetInterceptPlayer(fleet, makeAggressive, makeLowRepImpact, true, interceptDays);
 	}
+	// COOP FORK BEGIN (0.98a-RC8): Preserve vanilla Host entry and share interception with Guest alarm authority.
 	public static void makeFleetInterceptPlayer(CampaignFleetAPI fleet, boolean makeAggressive, boolean makeLowRepImpact, boolean makeHostile, float interceptDays) {
 		coopMakeFleetInterceptPlayer(fleet, makeAggressive, makeLowRepImpact, makeHostile,
 				interceptDays, Global.getSector().getPlayerFleet());
@@ -280,6 +282,7 @@ public class TransmitterTrapSpecial extends BaseSalvageSpecial {
 		
 		fleet.addAssignmentAtStart(FleetAssignment.INTERCEPT, playerFleet, interceptDays, null);
 	}
+	// COOP FORK END
 	
 	
 	@Override

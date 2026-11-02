@@ -5,6 +5,7 @@ import coop.net.CoopMessages;
 import coop.session.CoopSessionState;
 import coop.testing.RecordingNetService;
 import coop.testing.TestSessions;
+import coop.testing.LogCapture;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -89,10 +90,10 @@ class CoopLightAuthorityTest {
         Fixture f = new Fixture(false);
         String old = "light:00000000-0000-0000-0000-000000000003";
         f.world.guest.put(old, light(old)); f.world.legacy.add("old-native"); f.world.failUpsert = OTHER;
-        assertThrows(IllegalStateException.class, () -> f.authority.applySet(CoopLightCodec.encodeSet(List.of(light(ID), light(OTHER)))));
+        f.authority.applySet(CoopLightCodec.encodeSet(List.of(light(ID), light(OTHER))));
         assertTrue(f.world.guest.containsKey(old)); assertEquals(List.of("old-native"), f.world.legacy);
         assertFalse(f.world.calls.contains("remove:" + old)); assertFalse(f.world.calls.contains("legacy"));
-        f.world.failUpsert = null; f.authority.tickGuest();
+        f.world.failUpsert = null; f.now.set(CoopLightAuthority.APPLY_RETRY_MILLIS); f.authority.tickGuest();
         assertEquals(Set.of(ID, OTHER), f.world.guest.keySet()); assertTrue(f.world.legacy.isEmpty());
         assertTrue(f.world.calls.indexOf("upsert:" + OTHER) < f.world.calls.indexOf("remove:" + old));
     }
@@ -107,13 +108,50 @@ class CoopLightAuthorityTest {
 
     @Test void failedNativeManifestDoesNotBlockAnUnrelatedSavedPendingClaim() {
         Fixture f = new Fixture(false); f.world.pending.add(request(ID)); f.world.failUpsert = OTHER;
-        assertThrows(IllegalStateException.class, () -> f.authority.applySet(CoopLightCodec.encodeSet(List.of(light(OTHER)))));
-        assertThrows(IllegalStateException.class, f.authority::tickGuest);
+        f.authority.applySet(CoopLightCodec.encodeSet(List.of(light(OTHER))));
+        f.authority.tickGuest();
         assertEquals(List.of(CoopMessages.Type.LIGHT_REQUEST), f.types());
-        f.now.set(1_000); assertThrows(IllegalStateException.class, f.authority::tickGuest);
+        f.now.set(1_000); f.authority.tickGuest();
         assertEquals(1, f.net.sent.size());
-        f.now.set(2_000); assertThrows(IllegalStateException.class, f.authority::tickGuest);
+        f.now.set(2_000); f.authority.tickGuest();
         assertEquals(2, f.net.sent.size()); assertEquals(1, f.world.pending.size());
+    }
+
+    @Test void failedManifestRetriesOncePerSecondAndWarnsOnceUntilRecovery() {
+        Fixture f = new Fixture(false); f.world.failUpsert = ID;
+        LogCapture log = LogCapture.attach(CoopLightAuthority.class);
+        try {
+            String set = CoopLightCodec.encodeSet(List.of(light(ID)));
+            f.authority.applySet(set);
+            for (int i = 0; i < 60; i++) { f.now.set(i * 16L); f.authority.tickGuest(); }
+            assertEquals(1, f.world.upsertAttempts);
+            f.now.set(1_000); f.authority.tickGuest();
+            assertEquals(2, f.world.upsertAttempts);
+            f.authority.applySet(set); // Repeated full snapshots cannot bypass the retry delay.
+            assertEquals(2, f.world.upsertAttempts);
+            assertEquals(1, log.matching("Failed to apply abyssal light manifest").size());
+            f.world.failUpsert = null; f.now.set(2_000); f.authority.tickGuest();
+            assertEquals(Set.of(ID), f.world.guest.keySet());
+            f.world.failUpsert = ID; f.authority.applySet(set);
+            assertEquals(2, log.matching("Failed to apply abyssal light manifest").size());
+        } finally { log.detach(); }
+    }
+
+    @Test void olderManifestCannotResurrectLifecycleRemovalAndRearmPreservesSequence() {
+        Fixture f = new Fixture(false);
+        String initial = CoopLightCodec.encodeSet(List.of(light(ID)));
+        f.authority.applySet(initial, 10L);
+        f.authority.applySet(CoopLightCodec.encodeSet(List.of()), 12L);
+        assertTrue(f.world.guest.isEmpty());
+        assertTrue(f.world.tombstones.isEmpty());
+        f.authority.rearmFullBroadcast();
+        f.authority.applySet(initial, 11L);
+        f.authority.applySet(initial, 12L);
+        assertTrue(f.world.guest.isEmpty());
+        f.authority.applySet(CoopLightCodec.encodeSet(List.of(light(OTHER))), 13L);
+        assertEquals(Set.of(OTHER), f.world.guest.keySet());
+        f.authority.reset(); f.authority.applySet(initial, 0L);
+        assertEquals(Set.of(ID), f.world.guest.keySet());
     }
 
     @Test void pendingClaimsAreObservedBeforeManifestCanOverwriteNativeState() {
@@ -291,11 +329,12 @@ class CoopLightAuthorityTest {
         String failUpsert;
         CoopLightCodec.Outcome overrideOutcome;
         boolean failOutcome, actorUnavailable;
-        int captures, effects, awardedPoints, requestCalls;
+        int captures, effects, awardedPoints, requestCalls, upsertAttempts;
         float awardedBonus;
         public List<CoopLightRecord> captureHost() { captures++; return host; }
         public Set<String> taggedIds() { return Set.copyOf(guest.keySet()); }
         public void upsert(CoopLightRecord record) {
+            upsertAttempts++;
             if (record.id().equals(failUpsert)) throw new IllegalStateException("native construction failed");
             calls.add("upsert:" + record.id());
             if (!tombstones.contains(record.id())) guest.put(record.id(), record);

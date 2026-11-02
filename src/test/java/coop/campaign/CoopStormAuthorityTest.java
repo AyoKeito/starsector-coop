@@ -36,6 +36,19 @@ class CoopStormAuthorityTest {
         f.world.host = null; f.now.set(500); f.authority.tickHost(); assertEquals(1, f.net.sent.size());
     }
 
+    @Test void unchangedHostForcesPeriodicAbsoluteRefreshWithoutRequiringResume() {
+        Fixture f = new Fixture(true);
+        f.authority.tickHost(); assertEquals(1, f.world.forcedCaptures);
+        f.now.set(250); f.authority.tickHost();
+        assertEquals(1, f.net.sent.size()); assertEquals(1, f.world.forcedCaptures);
+        f.now.set(CoopStormAuthority.FULL_SNAPSHOT_INTERVAL_MILLIS - 250); f.authority.tickHost();
+        assertEquals(1, f.net.sent.size());
+        f.now.set(CoopStormAuthority.FULL_SNAPSHOT_INTERVAL_MILLIS); f.authority.tickHost();
+        assertEquals(List.of(CoopMessages.Type.STORM_SET, CoopMessages.Type.STORM_GRID), f.types());
+        assertEquals(2, f.world.forcedCaptures);
+        f.now.addAndGet(250); f.authority.tickHost(); assertEquals(2, f.net.sent.size());
+    }
+
     @Test void freshAuthenticatedSetReplacesAheadSavedGuestButGridCannotPrecedeBaseline() {
         Fixture f = new Fixture(false); f.world.saved = snapshot(99);
         assertThrows(IllegalStateException.class, () -> f.authority.applyGrid(encoded(1)));
@@ -190,8 +203,12 @@ class CoopStormAuthorityTest {
         CoopStormSnapshot host = snapshot(1), saved;
         final List<CoopStormControl> controls = new ArrayList<>();
         boolean failApply, rejectControl;
-        int captures, applies, observations, drains, resets, controlCalls;
+        int captures, forcedCaptures, applies, observations, drains, resets, controlCalls;
         public CoopStormSnapshot captureHost() { captures++; return host; }
+        public CoopStormSnapshot captureHost(boolean force) {
+            if (force) forcedCaptures++;
+            return captureHost();
+        }
         public void applySnapshot(CoopStormSnapshot snapshot) {
             if (failApply) throw new IllegalStateException("native terrain not ready");
             saved = snapshot; applies++;

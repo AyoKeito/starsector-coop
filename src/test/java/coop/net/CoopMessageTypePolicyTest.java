@@ -235,6 +235,7 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.STATE_DATAGRAM, CoopMessages.Type.TIME_SNAPSHOT,
             CoopMessages.Type.FLEET_SNAPSHOT, CoopMessages.Type.NPC_FLEET_MOTION,
             CoopMessages.Type.STORM_GRID, CoopMessages.Type.STORM_CONTROL,
+            CoopMessages.Type.STREAM_ADD,
             CoopMessages.Type.BATTLE_STATUS);
 
     private static CoopMessages.Message message(CoopMessages.Type type) {
@@ -450,7 +451,7 @@ class CoopMessageTypePolicyTest {
             assertFalse(CoopNetPump.allowedDuringReconnectGrace(type), type.name());
             assertFalse(CoopNetService.isConnectionScopedControl(type), type.name());
             assertFalse(CoopNetPump.isControlPlane(type), type.name());
-            assertFalse(CoopNetPump.isHighFrequency(type), type.name());
+            assertEquals(type == CoopMessages.Type.STREAM_ADD, CoopNetPump.isHighFrequency(type), type.name());
         }
     }
 

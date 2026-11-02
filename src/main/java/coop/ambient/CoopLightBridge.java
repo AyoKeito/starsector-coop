@@ -14,6 +14,7 @@ import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.EnumSet;
 import java.util.function.Supplier;
 
 /** Transient system-loader seam for the pinned native light plugin. Never saved on an entity. */
@@ -26,6 +27,8 @@ public final class CoopLightBridge {
     private static Handler handler;
     private static Boolean versionOk;
     private static int authoritativeDespawnDepth;
+    public enum NativeHook { LIFETIME, DESPAWN, ENCOUNTER, DIALOG, PULSE, DWELLER_ENGAGEMENT }
+    private static final EnumSet<NativeHook> reportedNativeFailures = EnumSet.noneOf(NativeHook.class);
     private static final int MAX_ENCOUNTER_DIAGNOSTICS = 16;
     private static final List<EncounterTrace> encounterDiagnostics = new ArrayList<>();
 
@@ -115,6 +118,15 @@ public final class CoopLightBridge {
         versionOk = null;
         authoritativeDespawnDepth = 0;
         encounterDiagnostics.clear();
+        reportedNativeFailures.clear();
+    }
+
+    /** Called by native fork guards. Logging must never turn containment into another exception. */
+    public static void reportNativeFailure(NativeHook hook, Throwable failure) {
+        try {
+            if (reportedNativeFailures.add(hook)) Global.getLogger(CoopLightBridge.class).warn(
+                    "[COOP-FORK] light hook " + hook + " failed; native action suppressed", failure);
+        } catch (Throwable ignored) { }
     }
 
     public static boolean isCanonicalId(Object value) {

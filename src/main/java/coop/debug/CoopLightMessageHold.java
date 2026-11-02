@@ -6,6 +6,8 @@ import coop.net.CoopMessages;
 import coop.util.CoopDebug;
 
 import java.util.LinkedHashMap;
+import java.util.ArrayDeque;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
@@ -28,6 +30,36 @@ public final class CoopLightMessageHold {
     private String identity;
     private long matchingMessages;
     private Map<String, Object> lastReceipt = Map.of();
+    private static final int MAX_CLAIM_OBSERVATIONS = 128;
+    private final ArrayDeque<Map<String, Object>> claimObservations = new ArrayDeque<>();
+    private long evictedObservations;
+
+    public Map<String, Object> claimObservations() {
+        return Map.of("observations", List.copyOf(claimObservations),
+                "maxObservations", MAX_CLAIM_OBSERVATIONS, "evictedObservations", evictedObservations);
+    }
+
+    public void observeClaimReply(String direction, CoopMessages.Message message, boolean matched,
+                                  String currentToken, long now) {
+        if (!CoopDebug.diagnosticsEnabled()) return;
+        String entityId = CoopMessages.requiredPayloadString(message, "entityId");
+        if (!coop.ambient.CoopLightBridge.isCanonicalId(entityId)) return;
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("atMillis", now); row.put("direction", direction);
+        row.put("type", message.type().name()); row.put("sessionId", empty(message.sessionId()));
+        row.put("lightId", entityId); row.put("token", empty(CoopMessages.interactionLightClaimToken(message)));
+        row.put("currentToken", empty(currentToken)); row.put("matched", matched); row.put("seq", message.seq());
+        if (message.type() == CoopMessages.Type.INTERACTION_ACCEPT) {
+            row.put("playerId", CoopMessages.requiredPayloadString(message, "playerId"));
+            row.put("hostSeq", CoopMessages.payload(message).requiredLong("hostSeq"));
+        } else row.put("reason", CoopMessages.requiredPayloadString(message, "reason"));
+        if (claimObservations.size() == MAX_CLAIM_OBSERVATIONS) {
+            claimObservations.removeFirst(); evictedObservations++;
+        }
+        claimObservations.addLast(Map.copyOf(row));
+    }
+
+    private static String empty(String value) { return value == null ? "" : value; }
 
     public boolean isArmed() { return context != null; }
 

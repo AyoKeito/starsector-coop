@@ -21,11 +21,13 @@ import com.fs.starfarer.api.impl.campaign.enc.AbyssalLightEPEC.LightSpawnType;
 import com.fs.starfarer.api.impl.campaign.enc.EncounterManager;
 import com.fs.starfarer.api.impl.campaign.enc.EncounterPoint;
 import com.fs.starfarer.api.impl.campaign.ids.Tags;
+import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
 import com.fs.starfarer.api.impl.campaign.terrain.HyperspaceAbyssPluginImpl.AbyssalEPData;
 import coop.ambient.CoopLightBridge;
 import coop.presence.CoopPresenceRegistry;
 import coop.testing.ApiProxies;
 import coop.testing.ProxyDefaults;
+import coop.testing.LogCapture;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -165,6 +167,45 @@ class CoopLightNativeTest {
         assertTrue(script.isDone()); assertEquals(0, scene.actorDespawnCalls);
     }
 
+    @Test void nativePulseDialogAndDespawnContainHandlerErrorsAndWarnOncePerHook() throws Exception {
+        Scene scene = new Scene(); Global.setSector(scene.sector);
+        Light light = scene.add("managed", new AbyssalLightParams());
+        light.saved.put(CoopLightBridge.LIGHT_ID_KEY, "light:01234567-89ab-4def-8123-0123456789ab");
+        CampaignFleetAPI player = scene.actor(true, false);
+        scene.actors.add(player);
+        player.getMemoryWithoutUpdate().set(MemFlags.JUST_DID_SENSOR_BURST, true);
+        scene.saved.put(MemFlags.GLOBAL_SENSOR_BURST_JUST_USED_IN_CURRENT_LOCATION, true);
+        field(AbyssalLightEntityPlugin.class, "untilFrequencyChange").set(light.plugin, 1000f);
+        int[] pulses = {0};
+        CoopLightBridge.install(true, new CoopLightBridge.Handler() {
+            @Override public void requestPulse(SectorEntityToken ignored, boolean sensor) {
+                pulses[0]++; throw new AssertionError("native callback failed");
+            }
+            @Override public void requestDwellerConsumption(SectorEntityToken ignored) {
+                throw new AssertionError("native callback failed");
+            }
+            @Override public boolean allowDwellerDialog(SectorEntityToken ignored) {
+                throw new AssertionError("native callback failed");
+            }
+        });
+        LogCapture log = LogCapture.attach(CoopLightBridge.class);
+        try {
+            var script = new AbyssalLightEntityPlugin.DwellerEncounterScript("unused", player, light.entity);
+            for (int i = 0; i < 20; i++) {
+                assertDoesNotThrow(() -> light.plugin.advance(0.25f));
+                assertDoesNotThrow(() -> light.plugin.despawn(AbyssalLightEntityPlugin.DespawnType.EXPAND));
+                assertDoesNotThrow(() -> script.advance(0.25f));
+            }
+            assertTrue(pulses[0] > 1);
+            assertFalse(light.plugin.isDespawning());
+            assertFalse(script.isDone());
+            assertFalse(light.tags.contains(Tags.FADING_OUT_AND_EXPIRING));
+            assertEquals(1, log.matching("light hook PULSE failed").size());
+            assertEquals(1, log.matching("light hook DESPAWN failed").size());
+            assertEquals(1, log.matching("light hook DIALOG failed").size());
+        } finally { log.detach(); }
+    }
+
     @Test void guestNativePulseCannotGrantOrConsumeBeforeAHandlerAndManifestExist() {
         Scene scene = new Scene(); Global.setSector(scene.sector);
         Light light = scene.add("legacy", new AbyssalLightParams());
@@ -200,6 +241,7 @@ class CoopLightNativeTest {
 
     private static final class Scene {
         final List<Light> lights = new ArrayList<>();
+        final List<CampaignFleetAPI> actors = new ArrayList<>();
         final Map<String, Object> saved = new HashMap<>();
         final SectorAPI sector;
         final LocationAPI hyper;
@@ -209,6 +251,7 @@ class CoopLightNativeTest {
         Scene() {
             hyper = stub(LocationAPI.class, (method, args) -> switch (method) {
                 case "isHyperspace" -> true;
+                case "getFleets" -> actors;
                 case "getAllEntities" -> new ArrayList<>(lights.stream().map(l -> (SectorEntityToken) l.entity).toList());
                 case "addCustomEntity" -> add(args[0] == null ? "native_" + lights.size() : (String) args[0], (AbyssalLightParams) args[4]).entity;
                 default -> null;

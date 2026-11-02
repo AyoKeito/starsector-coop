@@ -19,6 +19,7 @@ import coop.debug.CoopLightGrantFault;
 import coop.fleet.CoopGuestMirrorHandle;
 import coop.net.CoopJson;
 import coop.util.CoopDebug;
+import coop.util.CoopLog;
 
 import java.awt.Color;
 import java.util.ArrayList;
@@ -43,8 +44,7 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
     public static final String STATE_KEY = "$coopLightState";
     public static final String HOST_ENTITY_ID_KEY = "$coopLightHostEntityId";
     private static final int MAX_PENDING = 1_024;
-    private static final int MAX_HISTORY = 32_768;
-    private static final int MAX_SAVED_CHARACTERS = 16 * 1024 * 1024;
+    static final int MAX_REJECTED_RESULTS = 1_024;
 
     private final Supplier<SectorAPI> sectorSupplier;
     private final Supplier<CampaignFleetAPI> remoteActorSupplier;
@@ -58,6 +58,8 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
     private SectorAPI cachedSector;
     private String cachedText;
     private State cachedState;
+    private final Set<String> reportedReplayFailures = new LinkedHashSet<>();
+    private final Set<String> reportedDespawnFailures = new LinkedHashSet<>();
 
     interface NativeCodec {
         CoopLightRecord capture(CustomCampaignEntityAPI entity, String id);
@@ -218,6 +220,7 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
         State state = state();
         if (state.pending.values().stream().anyMatch(request -> request.lightId().equals(id))) return;
         if (state.pending.size() >= MAX_PENDING) throw new IllegalStateException("Light pending-request limit reached");
+        state = state.copy();
         CoopLightCodec.Request request = new CoopLightCodec.Request(id, UUID.randomUUID().toString(), action);
         state.pending.put(request.requestId(), request);
         save(state);
@@ -230,7 +233,23 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
         // A native reward failure or a save taken with a pending local operation can retry the
         // already committed Host result without authorizing or granting it a second time.
         if (!guest && localActorId != null) {
-            for (CoopLightCodec.Request request : pendingRequests()) acceptOutcome(applyRequest(request, localActorId));
+            List<CoopLightCodec.Request> pending = pendingRequests();
+            reportedReplayFailures.retainAll(pending.stream().map(CoopLightCodec.Request::requestId).toList());
+            for (CoopLightCodec.Request request : pending) {
+                // Uncertainty is durable evidence of a possibly completed grant, never a retry.
+                if (state().uncertain.contains(request.requestId())) {
+                    if (reportedReplayFailures.add(request.requestId()))
+                        CoopLog.warn(CoopLightWorld.class, "Retaining uncertain light reward " + request.requestId() + "; native grant will not repeat");
+                    continue;
+                }
+                try {
+                    acceptOutcome(applyRequest(request, localActorId));
+                    reportedReplayFailures.remove(request.requestId());
+                } catch (Throwable failure) {
+                    if (reportedReplayFailures.add(request.requestId()))
+                        CoopLog.warn(CoopLightWorld.class, "Failed to replay local light request " + request.requestId(), failure);
+                }
+            }
         }
         State state = state();
         List<CoopLightRecord> records = new ArrayList<>();
@@ -246,9 +265,17 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
                 entity.getMemoryWithoutUpdate().set(LIGHT_ID_KEY, id);
                 seen.add(id);
             }
-            if (state.consumed.contains(id)) codec.despawn(entity, false);
-            else records.add(codec.capture(entity, id));
+            if (state.consumed.contains(id)) {
+                try {
+                    codec.despawn(entity, false);
+                    reportedDespawnFailures.remove(id);
+                } catch (Throwable failure) {
+                    if (reportedDespawnFailures.add(id))
+                        CoopLog.warn(CoopLightWorld.class, "Failed to despawn consumed light " + id, failure);
+                }
+            } else records.add(codec.capture(entity, id));
         }
+        reportedDespawnFailures.retainAll(seen);
         records.sort(Comparator.comparing(CoopLightRecord::id));
         // The wire cap must be checked before this can become an authoritative full set.
         CoopLightCodec.encodeSet(records);
@@ -298,8 +325,8 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
 
     @Override public void remove(String id) {
         CoopLightRecord.canonicalId(id);
-        State state = state();
-        if (state.consumed.add(id)) save(state);
+        // A complete Host manifest owns lifecycle absence. Only an accepted consumption outcome
+        // needs a durable tombstone; natural expiry must not grow the reward replay ledger.
         CustomCampaignEntityAPI entity = find(id);
         if (entity != null && !codec.isDespawning(entity)) codec.despawn(entity, false);
     }
@@ -366,7 +393,13 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
         }
         CoopLightCodec.Outcome outcome = new CoopLightCodec.Outcome(request.requestId(), request.lightId(), actorId,
                 request.action(), rejection == null, record, bonus, points, rejection == null ? "accepted" : rejection);
+        // Rejected requests create no irreversible transaction. Bound new admissions without
+        // evicting first-wins replies or blocking genuine consumption when this quota is full.
+        if (!outcome.accepted() && state.rejectedResults >= MAX_REJECTED_RESULTS)
+            throw new IllegalStateException("Rejected light request history is full; refusing a new rejection");
+        state = state.copy();
         state.results.put(request.requestId(), outcome);
+        if (!outcome.accepted()) state.rejectedResults++;
         if (outcome.accepted()) state.consumed.add(request.lightId());
         // Result and tombstone are one primitive String write, before changing the native entity.
         save(state);
@@ -405,9 +438,7 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
             throw new IllegalStateException("Light reward application is uncertain for " + outcome.requestId()
                     + "; refusing to repeat a possibly applied native reward");
         }
-        if (ownPending && !state.applied.contains(outcome.requestId()) && state.applied.size() >= MAX_HISTORY) {
-            throw new IllegalStateException("Applied light reward history limit reached; refusing to forget outcomes");
-        }
+        state = state.copy();
         if (outcome.accepted()) state.consumed.add(outcome.lightId());
         boolean grant = ownPending && !state.applied.contains(outcome.requestId()) && outcome.accepted()
                 && outcome.action() != CoopLightCodec.Action.DWELLER;
@@ -553,24 +584,26 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
         final Set<String> consumed = new LinkedHashSet<>();
         final Set<String> applied = new LinkedHashSet<>();
         final Set<String> uncertain = new LinkedHashSet<>();
+        int rejectedResults;
         State copy() {
             State copy = new State();
             copy.pending.putAll(pending); copy.results.putAll(results);
             copy.consumed.addAll(consumed); copy.applied.addAll(applied); copy.uncertain.addAll(uncertain);
+            copy.rejectedResults = rejectedResults;
             return copy;
         }
     }
 
+    /** Read-only cached view. Writers must take a copy before changing any collection. */
     private State state() {
         SectorAPI sector = sectorSupplier.get();
         if (sector == null) return new State();
         Object value = sector.getMemoryWithoutUpdate().get(STATE_KEY);
         if (value != null && !(value instanceof String)) throw new IllegalStateException("Saved light state is not text");
         String text = (String) value;
-        if (sector == cachedSector && Objects.equals(text, cachedText) && cachedState != null) return cachedState.copy();
+        if (sector == cachedSector && Objects.equals(text, cachedText) && cachedState != null) return cachedState;
         State state = new State();
         if (text != null) {
-            if (text.length() > MAX_SAVED_CHARACTERS) throw new IllegalStateException("Saved light state exceeds cap");
             Object parsed = CoopJson.parse(text);
             if (!(parsed instanceof List<?> entries)) throw new IllegalStateException("Saved light state is not an array");
             for (Object entry : entries) {
@@ -585,6 +618,7 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
                     case 'R' -> {
                         CoopLightCodec.Outcome result = CoopLightCodec.Outcome.decode(payload);
                         fresh = state.results.putIfAbsent(result.requestId(), result) == null;
+                        if (fresh && !result.accepted()) state.rejectedResults++;
                     }
                     case 'T' -> fresh = state.consumed.add(CoopLightRecord.canonicalId(payload));
                     case 'A' -> fresh = state.applied.add(CoopLightRecord.uuid(payload, "applied light request"));
@@ -595,7 +629,7 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
             }
         }
         checkStateSize(state);
-        cachedSector = sector; cachedText = text; cachedState = state.copy();
+        cachedSector = sector; cachedText = text; cachedState = state;
         return state;
     }
 
@@ -616,7 +650,6 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
         for (String row : rows) {
             if (encoded.length() > 1) encoded.append(',');
             encoded.append('"').append(CoopJson.escape(row)).append('"');
-            if (encoded.length() > MAX_SAVED_CHARACTERS) throw new IllegalStateException("Saved light state exceeds cap");
         }
         return encoded.append(']').toString();
     }
@@ -628,11 +661,8 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
     }
 
     private static void checkStateSize(State state) {
-        if (state.pending.size() > MAX_PENDING || state.results.size() > MAX_HISTORY
-                || state.consumed.size() > MAX_HISTORY || state.applied.size() > MAX_HISTORY) {
-            throw new IllegalStateException("Saved light state history limit reached; refusing to forget outcomes");
-        }
-        if (state.uncertain.size() > MAX_HISTORY || !state.pending.keySet().containsAll(state.uncertain)
+        if (state.pending.size() > MAX_PENDING) throw new IllegalStateException("Saved light pending-request limit reached");
+        if (!state.pending.keySet().containsAll(state.uncertain)
                 || state.uncertain.stream().anyMatch(state.applied::contains)) {
             throw new IllegalStateException("Invalid uncertain light reward state");
         }

@@ -525,6 +525,18 @@ class CoopNpcFleetSuppressorTest {
     }
 
     @Test
+    void pendingSeasonalReadDefersSpawnerRemovalButStillSweepsNativeFleets() {
+        SweepSector sector = new SweepSector();
+        CoopNpcFleetSuppressor suppressor = new CoopNpcFleetSuppressor();
+        suppressor.tick(sector.proxy(), 1_000L, false);
+        assertEquals(1, sector.corvus.removed.size());
+        assertFalse(suppressor.spawnersSuppressed());
+        suppressor.tick(sector.proxy(), 1_001L, true);
+        assertTrue(suppressor.spawnersSuppressed());
+        assertEquals(1, suppressor.spawnerSuppressionRuns());
+    }
+
+    @Test
     void resetReArmsTheSweepForTheNextSession() {
         SweepSector sector = new SweepSector();
         CoopNpcFleetSuppressor suppressor = new CoopNpcFleetSuppressor();

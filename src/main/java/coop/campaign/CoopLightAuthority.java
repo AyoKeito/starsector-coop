@@ -4,6 +4,7 @@ import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
 import coop.net.CoopNetService;
 import coop.session.CoopSessionState;
+import coop.util.CoopLog;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -18,6 +19,7 @@ public final class CoopLightAuthority {
     static final long POLL_INTERVAL_MILLIS = 250L;
     static final long FULL_SET_INTERVAL_MILLIS = 5_000L;
     static final long REQUEST_RETRY_MILLIS = 2_000L;
+    static final long APPLY_RETRY_MILLIS = 1_000L;
 
     public interface LightWorld {
         /** Null is an unavailable scan; an empty list authoritatively contains no lights. */
@@ -45,6 +47,9 @@ public final class CoopLightAuthority {
     private long nextHostPoll;
     private long nextFullSet;
     private boolean retryApply;
+    private long nextApplyAttempt;
+    private boolean warnedApplyFailure;
+    private long lastManifestSeq = -1L;
     private boolean fullBroadcast = true;
 
     public CoopLightAuthority(CoopNetService service, CoopSessionState session, LongSupplier clock) {
@@ -105,10 +110,18 @@ public final class CoopLightAuthority {
     }
 
     public void applySet(String encoded) {
+        applySet(encoded, Math.addExact(lastManifestSeq, 1L));
+    }
+
+    /** Full manifests are monotonic within a session; lifecycle absence needs no saved tombstone. */
+    public void applySet(String encoded, long seq) {
         requireRole(CoopConnectionRole.GUEST);
         List<CoopLightRecord> records = CoopLightCodec.decodeSet(encoded);
         requireFrame(CoopMessages.lightSet(session.sessionId(), 0L, 0L, encoded));
+        if (seq < 0) throw new IllegalArgumentException("Negative light manifest sequence");
+        if (seq <= lastManifestSeq) return;
         observeGuest();
+        lastManifestSeq = seq;
         desired = records;
         retryApply = true;
         reconcile();
@@ -116,12 +129,24 @@ public final class CoopLightAuthority {
 
     private void reconcile() {
         if (desired == null) return;
+        long now = clock.getAsLong();
+        if (now < nextApplyAttempt) return;
         // A construction failure must never turn part of a set into permission to delete.
-        for (CoopLightRecord record : desired) world.upsert(record);
-        Set<String> wanted = desired.stream().map(CoopLightRecord::id).collect(Collectors.toSet());
-        for (String id : Set.copyOf(world.taggedIds())) if (!wanted.contains(id)) world.remove(id);
-        world.reconcileLegacy(desired);
-        retryApply = false;
+        try {
+            for (CoopLightRecord record : desired) world.upsert(record);
+            Set<String> wanted = desired.stream().map(CoopLightRecord::id).collect(Collectors.toSet());
+            for (String id : Set.copyOf(world.taggedIds())) if (!wanted.contains(id)) world.remove(id);
+            world.reconcileLegacy(desired);
+            retryApply = false;
+            nextApplyAttempt = 0L;
+            warnedApplyFailure = false;
+        } catch (Throwable failure) {
+            nextApplyAttempt = now + APPLY_RETRY_MILLIS;
+            if (!warnedApplyFailure) {
+                warnedApplyFailure = true;
+                CoopLog.warn(CoopLightAuthority.class, "Failed to apply abyssal light manifest; retrying in one second", failure);
+            }
+        }
     }
 
     /** Caller has already authenticated the wire sender; still bind it to the active Guest seat. */
@@ -183,6 +208,9 @@ public final class CoopLightAuthority {
         sentFingerprint = null;
         nextFullSet = 0L;
         retryApply = false;
+        nextApplyAttempt = 0L;
+        warnedApplyFailure = false;
+        lastManifestSeq = -1L;
         rearmFullBroadcast();
     }
 }

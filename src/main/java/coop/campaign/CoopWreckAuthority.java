@@ -56,6 +56,7 @@ public final class CoopWreckAuthority {
     private boolean fullBroadcast = true;
     private long nextPoll;
     private long nextFullSet;
+    private long lastLifecycleSeq = -1L;
     private final Map<String, Long> mutationSentAt = new LinkedHashMap<>();
 
     public CoopWreckAuthority(CoopNetService service, CoopSessionState session, LongSupplier clock) {
@@ -80,6 +81,8 @@ public final class CoopWreckAuthority {
                 throw new IllegalArgumentException("Too many host wrecks: " + records.size());
             }
             Set<String> consumed = world.consumedIds();
+            // Allocate the manifest envelope before its records so sequence order matches TCP order.
+            long manifestSeq = service.nextSeq();
             Map<String, String> current = new LinkedHashMap<>();
             Map<String, CoopMessages.Message> adds = new LinkedHashMap<>();
             // Validate the ENTIRE transaction before publishing its manifest. A failed record must
@@ -100,11 +103,8 @@ public final class CoopWreckAuthority {
                 }
                 adds.put(record.id(), message);
             }
-            for (String id : knownHost.keySet()) {
-                if (!current.containsKey(id)) world.markConsumed(id);
-            }
             if (fullBroadcast || now >= nextFullSet) {
-                service.send(CoopMessages.wreckSet(session.sessionId(), service.nextSeq(), now,
+                service.send(CoopMessages.wreckSet(session.sessionId(), manifestSeq, now,
                         CoopWreckRecord.encodeIds(current.keySet())));
                 adds.values().forEach(service::send);
                 fullBroadcast = false;
@@ -117,7 +117,6 @@ public final class CoopWreckAuthority {
                 }
                 for (String id : knownHost.keySet()) {
                     if (!current.containsKey(id)) {
-                        world.markConsumed(id);
                         service.send(CoopMessages.wreckRemove(session.sessionId(), service.nextSeq(), now, id));
                     }
                 }
@@ -178,7 +177,12 @@ public final class CoopWreckAuthority {
     }
 
     public void applySet(String encoded) {
+        applySet(encoded, nextLifecycleSeq());
+    }
+
+    public void applySet(String encoded, long seq) {
         Set<String> wanted = new LinkedHashSet<>(CoopWreckRecord.decodeIds(encoded));
+        if (!acceptLifecycle(seq)) return;
         captureLocalConsumes();
         manifestWanted = wanted;
         manifestRecords.clear();
@@ -187,7 +191,6 @@ public final class CoopWreckAuthority {
         for (String id : Set.copyOf(world.taggedIds())) {
             if (!wanted.contains(id)) {
                 guestTracked.remove(id); // remote removal must not become a local consume report
-                world.markConsumed(id);
                 world.discardMutations(id);
                 world.remove(id);
             }
@@ -200,8 +203,13 @@ public final class CoopWreckAuthority {
     }
 
     public void applyAdd(String encoded, long revision) {
+        applyAdd(encoded, revision, nextLifecycleSeq());
+    }
+
+    public void applyAdd(String encoded, long revision, long seq) {
         if (revision < 0) throw new IllegalArgumentException("Negative wreck revision");
         CoopWreckRecord record = CoopWreckRecord.decode(encoded);
+        if (!acceptLifecycle(seq)) return;
         captureLocalConsumes();
         if (!world.consumedIds().contains(record.id())) {
             world.upsert(record, revision);
@@ -230,12 +238,16 @@ public final class CoopWreckAuthority {
     }
 
     public void applyRemove(String id) {
+        applyRemove(id, nextLifecycleSeq());
+    }
+
+    public void applyRemove(String id, long seq) {
         checkedId(id);
+        if (!acceptLifecycle(seq)) return;
         captureLocalConsumes();
         guestTracked.remove(id);
         pendingConsumes.remove(id);
         sentConsumes.remove(id);
-        world.markConsumed(id); // terminal identity: even a stale ADD must not recreate this wreck
         world.discardMutations(id);
         if (manifestWanted != null) {
             manifestWanted.remove(id);
@@ -281,6 +293,18 @@ public final class CoopWreckAuthority {
         CoopWreckRecord.decodeIds(CoopWreckRecord.encodeIds(List.of(id)));
     }
 
+    private long nextLifecycleSeq() {
+        return Math.addExact(lastLifecycleSeq, 1L);
+    }
+
+    /** Ordered lifecycle envelopes replace durable tombstones for ordinary Host expiry. */
+    private boolean acceptLifecycle(long seq) {
+        if (seq < 0L) throw new IllegalArgumentException("Negative wreck lifecycle sequence");
+        if (seq <= lastLifecycleSeq) return false;
+        lastLifecycleSeq = seq;
+        return true;
+    }
+
     public void rearmFullBroadcast() {
         fullBroadcast = true;
         nextPoll = 0;
@@ -297,6 +321,7 @@ public final class CoopWreckAuthority {
         manifestRecords.clear();
         manifestWanted = null;
         loadedConsumes = false;
+        lastLifecycleSeq = -1L;
         rearmFullBroadcast();
     }
 }
