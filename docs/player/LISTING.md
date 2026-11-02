@@ -1,4 +1,4 @@
-# Starsector Coop V1 (0.1.5)
+# Starsector Coop V1 (0.2.0 preview)
 
 Two people, two copies of Starsector 0.98a-RC8, one campaign. The sector is generated once from a
 shared seed and both of you fly around in it at the same time, on one calendar. The host's game is
@@ -6,9 +6,13 @@ the authority: it runs the NPC fleets, the markets, the economy and the colonies
 game mirrors them. One of you pilots each battle; the other can send their fleet in as an AI ally.
 Author: AyoKeito.
 
+This prerelease is a manual download. Both players must install the same complete release archive;
+the launcher's update check looks for stable releases and will not offer this preview. Keep copies
+of both saves before trying it. Save compatibility with older releases is not promised.
+
 ## Requirements
 
-- Starsector `0.98a-RC8` on both PCs. A different RC is refused at connect. Same mod list, same
+- Starsector `0.98a-RC8` on both PCs. The mod checks the game version before connecting. Same mod list, same
   versions, same download of this mod, on both. Ironman off on both.
 - The host's machine reachable from the guest, by one of: a VPN pseudo-LAN, IPv6, a port forward you
   add yourself, or UPnP/NAT-PMP. `docs/player/CONNECT.md` walks through all four and explains what
@@ -52,6 +56,12 @@ shared, and docking refreshes what you see, on the open market, the black market
 submarket alike. Faction reputation is shared, which means your partner's smuggling shows up on your
 standing. Cargo pods are shared too, and they are how you hand your partner fuel or supplies:
 jettison it, they fly over and pick it up.
+
+**Ambient world preview.** Host-generated slipstreams and slipsurges, floating native hyperspace
+wrecks, supported abyssal systems, lights and storm phases are now replicated. Leviathan trails
+arrive as checkpoints, and the guest has a restricted set of local cosmetic sensor ghosts. Visual
+matching and the full range of native storm and light interactions still need in-game checking;
+this preview does not claim complete parity.
 
 **Handing things over.** Storage is one locker at every market that has one: whichever of you pays
 the 5000 credits opens it for both, and a ship parked by one of you comes out for the other with its
@@ -101,13 +111,13 @@ The full list is in `docs/player/LIMITATIONS.md`. The ones worth knowing before 
 - **Both players piloting in one battle is not in this release.** There is no in-game view of your partner's
   fight either, ally battles included. People watch over Discord screen share. Once your fleet joins
   as an ally the fleet AI flies it; you cannot give it orders or pull it back.
-- **Hyperspace is only partly shared.** Storm cells, star flares and slipstreams are rolled on each PC
-  separately, so the two of you see different weather and different slipstream maps, and your
-  partner's fleet can appear to cross empty hyperspace faster than it should. A storm only hits the
-  fleet standing in it, so what you lose is the matching sky, not ships.
-- **Deep space is the host's.** The abyss content (rogue stellar objects, the lights, Threat
-  encounters) exists on the host's engine only. The guest can fly in, and finds it empty. Sensor
-  ghosts do not appear for the guest anywhere.
+- **Ambient coverage has limits.** Star-corona and pulsar flares remain local. Each player's own
+  game rolls storm strikes, boosts and damage, and flash brightness can differ. Guest-created
+  slipsurges stay local; Leviathan trail growth can lag behind the host.
+- **Only supported abyssal content is copied.** Newly captured native rogue-object and dire-hint
+  systems and hyperspace lights are supported; older uncaptured systems and other encounter
+  creators are not. A guest exploring alone does not trigger new Host encounters. Sensor ghosts
+  are local and the guest's cosmetic subset does not mirror the host's ghosts.
 - **Story missions are the host's.** The Galatia Academy chain runs on the host's engine and its
   rewards go to the host. The story state is not shared, so the mod removes every way into the chain
   on the guest.
@@ -146,13 +156,13 @@ Places where the two games legitimately read differently. None of these is a bug
 
 Both of you press **Logs**, then **Save a bug report**, in the launcher, and attach both zips. That
 packs the logs before the next launch overwrites them, together with your settings, your newest save
-and a summary; the password is blanked out of everything in it. One side's zip tells half the story,
-because a refusal is one machine rejecting the other.
+and a summary. Passwords are scrubbed from the packed settings and launch line; logs and saves are
+copied without general redaction. One side's zip tells half the story, because a refusal is one
+machine rejecting the other.
 
-Paste the `[COOP-DOCTOR]` line from each side into the text of the report. It carries the code the
-dialog showed you and a session id that is identical in both logs, which is what pairs the two zips
-up. `docs/player/REPORTING.md` has the rest, including what to send when the launcher itself will not
-run.
+If a refusal dialog appeared, paste the `[COOP-DOCTOR]` line from each side into the report. For a
+world mismatch, press F11 to mark it and include both views and what each player was doing.
+`docs/player/REPORTING.md` has the rest, including what to send when the launcher itself will not run.
 
 ## License
 

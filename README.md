@@ -12,7 +12,9 @@ Your ships, cargo, credits, officers, and skills stay yours.
 </p>
 
 > [!IMPORTANT]
-> **Version 0.1.5 is in public testing.** One player pilots each battle on their own PC; the other
+> **Version 0.2.0 is a preview release.** Download its packaged ZIP manually from Releases; the
+> launcher's updater follows stable releases. Back up both players' saves before upgrading.
+> One player pilots each battle on their own PC; the other
 > player waits on a paused campaign, and can send their fleet in as an AI ally. Two players piloting
 > in the same battle is not supported in this release.
 
@@ -95,9 +97,11 @@ seed does not restore your progress. Save compatibility across mod releases is n
 
 A few other limits affect how you play:
 
-- **Story content:** the Galatia Academy chain runs on the host. Deep-space content and sensor
-  ghosts are also host-only.
-- **Weather:** hyperspace storms, star flares, and slipstreams differ between PCs.
+- **Story content:** the Galatia Academy chain runs on the host. Supported temporary abyssal
+  systems and free-standing lights are shared; their generation still follows the host's position.
+- **Weather and ghosts:** hyperspace storm state, Host slipstreams and Leviathan trails are shared.
+  Guest ability surges and cosmetic ghosts stay local; star flares and visual timing can differ.
+  Native storm/boost and ghost/trail visual acceptance remains open for this preview.
 - **Solo play:** disable the mod for separate solo campaigns. Co-op rules apply while it is enabled,
   even without a connected partner.
 

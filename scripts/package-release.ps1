@@ -358,6 +358,12 @@ Write-Host "Classloader split verified: coop/rng/, coop/presence/, coop/ambient/
 # The archive must unpack to a folder named exactly "coop": the handshake compares the mod path as
 # mods/<folder name>, so an archive that unpacks to "coop-0.1.0" is refused at connect.
 $stagingRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("coop-release-" + [guid]::NewGuid().ToString('N'))
+$stagingRoot = Resolve-CoopFullPath $stagingRoot
+$tempPrefix = (Resolve-CoopFullPath ([System.IO.Path]::GetTempPath())).TrimEnd('\') + '\'
+if (-not $stagingRoot.StartsWith($tempPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+        (Split-Path -Leaf $stagingRoot) -notmatch '^coop-release-[a-f0-9]{32}$') {
+    throw "Refusing to stage or recursively clean an unexpected release path: $stagingRoot"
+}
 $stagedMod = Join-Path $stagingRoot 'coop'
 
 try {

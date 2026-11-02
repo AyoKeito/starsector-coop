@@ -1,6 +1,6 @@
 # Codebase Map
 
-Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-11-02 (0.1.5).
+Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-11-02 (0.2.0 preview).
 
 P26 remains PARTIAL. M1/M2, shared wrecks and M3 are accepted within their recorded scope. M4/M5 have bounded MCP execution, lifecycle and travel evidence; native visual acceptance remains open. Guest-proximity encounter triggering remains unbuilt. Decisions and deferred gates live in [the plan](COOP_MP_IMPLEMENTATION_PLAN_V1.md#phase-26-hyperspace-ambient-world-replication-post-v1--slipstreams--abyssal-encounters); dated M3, M4 and M4/M5 acceptance reports retain the run history.
 
@@ -623,7 +623,7 @@ game's own `vmparams` do, because XStream 1.4.10 reflects into `java.base` durin
 | `README.md` | the player-facing pitch and release links |
 | `README_DEV.md` | every command: build, test, package, launch, two-client test, bridge verbs, release checklist, save-visible state |
 | `CLAUDE.md` | the short version an agent session gets wrong without being told |
-| `CHANGELOG.md` | per-release notes; 0.1.5 at the head |
+| `CHANGELOG.md` | per-release notes; 0.2.0 preview at the head |
 | `docs/COOP_MP_DESIGN.md` | design rationale |
 | `docs/COOP_MP_IMPLEMENTATION_PLAN_V1.md` | the phase ledger and every agreed decision. **Canonical for status** - when it and a phase's checkboxes disagree, the ledger wins |
 | `docs/starsector-runtime-limitations.md` | engine and sandbox facts plus accepted divergences; current facts only, entries are deleted when their fix lands |

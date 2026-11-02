@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.2.0 preview
+
+Shares more of the hyperspace world. Install the same packaged preview ZIP on both PCs and back
+up both saves first. This preview is downloaded manually; the launcher and Version Checker keep
+following the stable release feed.
+
+- Host seasonal slipstreams and slipsurges are shared, with local discovery preserved. Native
+  Leviathan and Calf trails share shape and fade checkpoints as they grow.
+- Floating hyperspace wrecks share resolved salvage and lifetime. Guest recovery and partial
+  salvage reach Host, including transmitter-trap fleet creation directed at the Guest.
+- Supported temporary abyssal systems share their generated contents, survey and consumed salvage.
+  Free-standing lights and Dweller encounters are shared; rewards belong to the consuming player.
+- Host owns the hyperspace storm grid and native storm phases. Ability-driven clearing and boost
+  controls keep their owner rules. Guest cosmetic sensor ghosts run locally.
+- Light callback failures are contained, retries are bounded, and uncertain rewards cannot grant
+  twice. Natural expiry no longer grows saved consumption histories. A failed seasonal cleanup no
+  longer prevents NPC replication. Idle trails and timer-only storm changes avoid repeated full
+  snapshots; storms retain a five-second full refresh.
+- Developer MCP dependencies are updated. They remain outside the player archive.
+
+Guest-proximity encounter generation remains unbuilt. Guest ability surges, cosmetic ghosts, star
+flares and visual timing retain local behavior. Native storm/boost/mirror and ghost/trail visual
+acceptance remains open; this preview does not claim those checks passed. See
+[Known limitations](docs/player/LIMITATIONS.md) for supported content and replay limits.
+
 ## 0.1.5
 
 Fixes to credit transfers, reconnects, consecutive ally battles, and the launcher.

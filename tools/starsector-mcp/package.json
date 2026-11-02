@@ -13,9 +13,9 @@
   },
   "scripts": {
     "start": "node index.js",
-    "test": "node --test test/mock-bridge-test.js test/light-hold-renewal-test.js"
+    "test": "node --test test/mock-bridge-test.js test/light-hold-renewal-test.js test/mcp-stdio-test.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.30.0"
+    "@modelcontextprotocol/sdk": "1.32.2"
   }
 }
