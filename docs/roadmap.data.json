@@ -10,19 +10,19 @@
       "key": "built",
       "icon": "✓",
       "label": "Built",
-      "note": "The stable release remains 0.1.5; completed capability evidence stays in the Phase Status Ledger."
+      "note": "0.1.5 remains stable; the 0.2.0 preview has bounded release-smoke evidence."
     },
     {
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "Prepare the 0.2.0 preview smoke; P26 native M4/M5 visual acceptance remains open."
+      "note": "P26 reliability and preview smoke are checked; full M4/M5 visual acceptance remains open."
     },
     {
       "key": "next",
       "icon": "▶",
       "label": "Next up",
-      "note": "Check the preview candidate before publication, then continue P26 native acceptance."
+      "note": "Continue full P26 native visual acceptance; deferred M3 edges remain non-blocking."
     },
     {
       "key": "queued",
@@ -37,16 +37,9 @@
       "note": "P26 remains partial, P22/P25/P27 remain queued, and P33 is built with native follow-ups."
     }
   ],
-  "hereHead": "You are here: preparing the 0.2.0 preview; release smoke remains.",
-  "here": "<b>0.2.0 preview is being prepared.</b> Ambient reliability fixes are complete. Check the candidate archive and two-client session before publication; previews install manually and 0.1.5 remains stable. Full M4/M5 native visual acceptance and Guest-proximity generation remain open. Deferred M3 edges remain non-blocking; computer use remains paused.",
+  "hereHead": "You are here: 0.2.0 preview smoke checked; full visual acceptance remains.",
+  "here": "<b>0.2.0 preview passed its bounded release smoke.</b> Install the same ZIP manually; 0.1.5 remains stable. The user accepts a minor visual mismatch for this preview. Full M4/M5 native visual acceptance and Guest-proximity generation remain open. Deferred M3 edges remain non-blocking; computer use remains paused.",
   "attention": [
-    {
-      "sev": "scope",
-      "sevLabel": "0.2.0 preview",
-      "head": "Check the packaged candidate before publishing",
-      "state": "release preparation; native smoke pending",
-      "body": "Build and verify the same archive on both test clients. Pass: matching active session/builds, moving mirrors, reconnect without state loss, and no duplicate light reward or resurrected salvage after save/load. Publish as a manual-download prerelease only after this release smoke; full visual acceptance remains separate."
-    },
     {
       "sev": "scope",
       "sevLabel": "P26 remaining milestones",
