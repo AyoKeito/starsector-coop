@@ -1,17 +1,18 @@
 # What is and is not shared
 
 Two Starsector installs, each running its own copy of the game engine, kept in agreement by messages
-over the network. The host's engine is the authority. Everything below follows from that, and none
-of it is a bug report; these are the places where two co-op campaigns differ from one solo campaign.
+over the network. The host's engine is the authority. This page lists deliberate differences from
+solo play and the preview features that still need in-game checking.
 
 ## The short list
 
 - **One of you pilots every battle.** Your fleet can join your partner's fight as an AI ally, with
   real losses, but two players piloting in one battle is not in this release.
-- **Hyperspace weather and slipstreams differ between you.** Each PC rolls its own storms, flares and
-  slipstream map. A storm that costs you combat readiness is invisible on your partner's screen.
-- **Deep space and sensor ghosts are host-only.** The abyss content exists on the host's engine, and
-  the guest sees no sensor ghosts anywhere.
+- **Ambient world synchronization is a preview.** Host slipstreams, floating hyperspace wrecks,
+  supported abyssal encounters, lights and storm phases now reach the guest. Matching visuals and
+  the full range of native storm effects still need in-game checking.
+- **Sensor ghosts stay local.** The guest runs a restricted cosmetic subset; the host's ghosts are
+  not mirrored. Star-corona and pulsar flares also remain local.
 - **Story missions are the host's.** The mod removes every way into the Galatia Academy chain on
   the guest. Contacts, person bounties and system bounties are local to each player.
 - **No trade screen between the two of you.** Cargo goes by jettisoned pod, ships through shared
@@ -115,15 +116,15 @@ breaks anything; both explain a "my Shift became a toggle" surprise.
 
 ## Shared, per-player, and neither
 
-**Shared.** The world and everything in it: NPC fleets, markets and their stock, colonies and their
+**Shared.** Host-owned campaign state: NPC fleets, markets and their stock, colonies and their
 industries, survey levels, explored ruins, salvaged wrecks, faction reputation, and the campaign
 clock. Markets share four counters, not one: the open market, the black market, the military
 submarket and the storage locker.
 
 **Per-player.** Your fleet, your cargo, your credits, your officers, your skills. Credits are yours
 alone until you send some: the Coop Options page has a Send credits row and that is the only thing
-that moves money between you. Salvage loot is per-player by design: the world remembers that a wreck
-was taken, and each of you rolls your own contents from it. Same rule for survey data.
+that moves money between you. The player who salvages keeps the loot; consuming a shared wreck
+removes it from the other map. Survey data stays with the player who performed the survey.
 
 **Neither, in this release.** Contacts, the missions contacts offer, and person bounties are local to
 each player. The guest gets no person bounties at all; the script that generates them is one of the
@@ -234,22 +235,30 @@ level without the cargo. A survey contract completes and pays when the target re
 without asking who did it, so a contract the guest is holding pays out when the host surveys the
 planet. And either player entering a system marks its planets as seen on both maps.
 
-**Weather and hyperspace.** Hyperspace storm cells and star flares are rolled independently on each
-PC. A storm only hits the fleet standing in it and both fleets are owner-authoritative, so the damage
-is real and it is yours alone: a cell that strikes your fleet does not exist on your partner's map,
-and what they see is your CR dropping for no reason they can point at. In a test run on 2026-09-15
-the guest lost 12%, 20% and 33% combat readiness over four days of hyperspace travel to three storm
-hits the host never saw, then repaired back to 70% over the next three weeks. Check your own screen,
-not your partner's, before reporting a CR drop in hyperspace as a bug. Slipstreams are the same story
-with a visible artifact: the two of you see different slipstream maps, so your partner's fleet can
-appear to cross empty hyperspace impossibly fast.
+**Ambient world preview.** The host now supplies seasonal slipstreams, Host-created slipsurges,
+floating native hyperspace wrecks, supported abyssal encounters and lights. Leviathan trails update
+in checkpoints, so growth can arrive late on the guest. Discovery remains local, and a slipsurge
+created by the guest stays on that PC. Custom terrain and custom wreck or light plugins are outside
+this synchronization.
 
-**The abyss.** The guest can fly into it. The deep content there (rogue stellar objects, lights,
-Threat encounters) exists on the host's engine only, so those are host experiences.
+**Weather.** The host supplies the hyperspace storm grid and storm phases. Each player's own game
+still rolls the strikes, boosts and damage that affect their fleet; a mirrored fleet is not struck
+again. Flash brightness can differ. Star-corona and pulsar flares remain independently generated.
+Visual checks of shared storm phases and the full range of physical storm effects are still open.
+Report a persistent phase or terrain mismatch rather than treating it as an expected difference.
 
-**Sensor ghosts** do not appear for the guest at all. Several ghost types spawn real fleets or touch
-story state, and an independent roll on the guest would be a real divergence rather than a visual one,
-so they are held back entirely.
+**The abyss.** Newly captured native rogue-object and dire-hint systems and hyperspace lights are
+replicated. Names and catalog labels can differ. Older systems without capture data, other encounter
+creators and custom plugins are not copied. Exploring near the guest alone does not trigger new
+Host abyssal encounters. Light rewards belong to the consuming player. If a native reward fails
+partway through, automatic repetition is refused to avoid giving it twice; keep the save and both
+logs when reporting it. Late replies after a session change and simultaneous Dweller interactions
+still need checking.
+
+**Sensor ghosts** are local effects. The guest gets only a restricted cosmetic subset that cannot
+create real fleets or change shared weather or slipstreams. The host keeps its native ghosts, which
+are not copied to the guest. Guest cosmetic activity restarts after loading, and its appearance still
+needs in-game checking.
 
 **Markets neither of you has visited recently** can drift apart, because Starsector rerolls shop stock
 on save when the last roll is over 30 days old, and the two of you save at different moments. Docking
@@ -307,8 +316,8 @@ that refuses timed leases keeps the port open until you next start the game.
 **Windows only in this release.** `Coop Launcher.cmd` is a Windows batch file that starts
 `jre\bin\javaw.exe`, a Windows executable at a Windows path. A Mac or Linux install starts the game
 from a shell script that carries the classpath inline, and none of that was tested here. Those
-players set the same values by hand: everything the launcher does to your configuration is writing
-`saves\common\coop_options.json.data`, and `INSTALL.md` section 9 is the same settings without it.
+players set connection values in `saves\common\coop_options.json.data` or use `-D` properties, and
+make the classpath and enabled-mod edits by hand. `INSTALL.md` section 9 covers the settings.
 
 **It edits two install files, and only when you press Fix.** The two things that have to be right
 and are outside the mod's reach are the classpath entry in `vmparams` and the mod tick in
@@ -317,19 +326,20 @@ that makes the exact edit described in `INSTALL.md`: `vmparams` is backed up to 
 first and rewritten as the same single line with the entry moved to the front, and `enabled_mods.json`
 gains `coop` with the other mods left in their order. An install under Program Files may refuse the
 write; the launcher then offers to restart itself as administrator, and if you decline it shows the
-manual edit instead. Beyond those two, it writes your settings file and its own log next to it in the
-mod folder.
+manual edit instead. Beyond those two, it writes settings under `saves\common` and
+`coop-launcher.log` in the mod folder.
 
 **The invite carries the password in clear text.** The `pw=` part of that one line is the password
 itself, so whatever you send the line through can read it. Send it the way you would send a password.
 The guest can read it out of their own launcher afterwards, which is the point.
 
-**Look up sends one request to an outside service.** Finding your public address means asking a
+**Look up asks an outside service.** Finding your public address means asking a
 machine on the Internet what address your packets arrive from; the launcher asks `api.ipify.org`, and
 `icanhazip.com` if the first does not answer. That service learns your IP address, which it would
 also learn from any web page you open. If you would rather not, leave the button alone and type the
-address in yourself. The update check is the only other outbound request: one call to GitHub's
-releases API when the window opens.
+address in yourself. The update check asks GitHub for the latest stable release when the window
+opens; it does not offer prereleases such as this preview. Connection checks also contact your
+router and the selected peer.
 
 **A green Check connection is not a promise the session will start.** It proves the port is reachable
 and that the thing answering is the co-op launcher. Mod lists, versions and seeds are compared later,

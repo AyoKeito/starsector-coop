@@ -68,6 +68,38 @@ public final class CoopMessages {
         NPC_FLEET_SET,
         NPC_FLEET_MOTION,
         BASE_SET,
+        /** Complete host abyssal encounter recipes and their saved exploration overlays. */
+        ENC_SET,
+        /** Phase 26: host live-id manifest, immediately followed by one upsert per stream. */
+        STREAM_SET,
+        /** Phase 26: one resolved host stream, including geometry and current live fade state. */
+        STREAM_ADD,
+        /** Phase 26: only the noise and timers changed when the host starts despawning a stream. */
+        STREAM_DESPAWN,
+        /** Phase 26: host terrain has expired; remove the replica with this stream id. */
+        STREAM_REMOVE,
+        /** Complete host hyperspace-wreck manifest, followed by every resolved record. */
+        WRECK_SET,
+        /** Resolved native wreck recovery data and host-owned motion/lifetime. */
+        WRECK_ADD,
+        /** Host-authoritative expiry or salvage removal. */
+        WRECK_REMOVE,
+        /** Guest salvage reports, durably retained until acknowledged by host absence. */
+        WRECK_CONSUME,
+        WRECK_MUTATION,
+        WRECK_MUTATION_ACK,
+        /** Complete Host-owned free-standing abyssal light state. */
+        LIGHT_SET,
+        /** Durable Guest light interaction, authenticated by the receiving session. */
+        LIGHT_REQUEST,
+        /** Host first-wins outcome, including the consuming player's reward recipe. */
+        LIGHT_RESULT,
+        /** Complete Host storm baseline, including native cell and tracker state. */
+        STORM_SET,
+        /** A newer complete Host storm revision within the current baseline. */
+        STORM_GRID,
+        /** Guest weather intent; the Host validates its actor, geometry and bounds. */
+        STORM_CONTROL,
         BATTLE_BEGIN,
         BATTLE_STATUS,
         BATTLE_END,
@@ -386,7 +418,13 @@ public final class CoopMessages {
                  SESSION_RESUME_REQUEST, SESSION_RESUME_ACCEPT, SESSION_RESUME_REJECT,
                  READY_STATE, FLEET_ROSTER_REQUEST, RELIABLE_ACK,
                  TIME_SNAPSHOT, PAUSE_INTENT, FLEET_SNAPSHOT, FLEET_ROSTER, GUEST_SNAPSHOT,
-                 ORBIT_SNAPSHOT, NPC_FLEET_SET, NPC_FLEET_MOTION, BASE_SET, STATE_DATAGRAM,
+                 ORBIT_SNAPSHOT, NPC_FLEET_SET, NPC_FLEET_MOTION, BASE_SET, ENC_SET, STATE_DATAGRAM,
+                 // Phase 26: resume sends a fresh manifest and every live stream. Replaying an old
+                 // upsert after that set could recreate terrain the host has already removed.
+                 STREAM_SET, STREAM_ADD, STREAM_DESPAWN, STREAM_REMOVE,
+                 WRECK_SET, WRECK_ADD, WRECK_REMOVE, WRECK_CONSUME, WRECK_MUTATION, WRECK_MUTATION_ACK,
+                 LIGHT_SET, LIGHT_REQUEST, LIGHT_RESULT,
+                 STORM_SET, STORM_GRID, STORM_CONTROL,
                  PLAYER_REP_SNAPSHOT, MISSION_POOL_SNAPSHOT,
                  MISSION_CLAIM_REQUEST, MISSION_CLAIM_ACCEPT, MISSION_CLAIM_REJECT,
                  MARKET_OPEN, MARKET_SNAPSHOT, COLONY_INCOME, EXPEDITION_WARNING,
@@ -825,26 +863,64 @@ public final class CoopMessages {
 
     public static Message interactionClaim(String sessionId, long seq, long sentAtMillis,
                                            String entityId, String entityName, String playerId) {
+        return interactionClaim(sessionId, seq, sentAtMillis, entityId, entityName, playerId, null);
+    }
+
+    public static Message interactionClaim(String sessionId, long seq, long sentAtMillis,
+                                           String entityId, String entityName, String playerId,
+                                           String lightClaimToken) {
         return new Message(Type.INTERACTION_CLAIM, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"entityId\":\"" + escapeJson(requireText(entityId, "entityId")) + "\","
                         + "\"entityName\":\"" + escapeJson(entityName == null ? "" : entityName) + "\","
-                        + "\"playerId\":\"" + escapeJson(requireText(playerId, "playerId")) + "\"}");
+                        + "\"playerId\":\"" + escapeJson(requireText(playerId, "playerId")) + "\""
+                        + lightClaimTokenField(lightClaimToken) + "}");
     }
 
     public static Message interactionAccept(String sessionId, long seq, long sentAtMillis,
                                             String entityId, String playerId, String entityName, long hostSeq) {
+        return interactionAccept(sessionId, seq, sentAtMillis, entityId, playerId, entityName, hostSeq, null);
+    }
+
+    public static Message interactionAccept(String sessionId, long seq, long sentAtMillis,
+                                            String entityId, String playerId, String entityName, long hostSeq,
+                                            String lightClaimToken) {
         return new Message(Type.INTERACTION_ACCEPT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"entityId\":\"" + escapeJson(requireText(entityId, "entityId")) + "\","
                         + "\"playerId\":\"" + escapeJson(requireText(playerId, "playerId")) + "\","
                         + "\"entityName\":\"" + escapeJson(entityName == null ? "" : entityName) + "\","
-                        + "\"hostSeq\":" + hostSeq + "}");
+                        + "\"hostSeq\":" + hostSeq + lightClaimTokenField(lightClaimToken) + "}");
     }
 
     public static Message interactionReject(String sessionId, long seq, long sentAtMillis,
                                             String entityId, String reason) {
+        return interactionReject(sessionId, seq, sentAtMillis, entityId, reason, null);
+    }
+
+    public static Message interactionReject(String sessionId, long seq, long sentAtMillis,
+                                            String entityId, String reason, String lightClaimToken) {
         return new Message(Type.INTERACTION_REJECT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"entityId\":\"" + escapeJson(requireText(entityId, "entityId")) + "\","
-                        + "\"reason\":\"" + escapeJson(reason == null ? "" : reason) + "\"}");
+                        + "\"reason\":\"" + escapeJson(reason == null ? "" : reason) + "\""
+                        + lightClaimTokenField(lightClaimToken) + "}");
+    }
+
+    /** Optional correlation for light preclaims; ordinary interaction messages omit it. */
+    public static String interactionLightClaimToken(Message message) {
+        Payload value = payload(message);
+        return value.raw().containsKey("lightClaimToken")
+                ? checkedLightClaimToken(value.requiredString("lightClaimToken")) : null;
+    }
+
+    private static String lightClaimTokenField(String token) {
+        String checked = checkedLightClaimToken(token);
+        return checked == null ? "" : ",\"lightClaimToken\":\"" + escapeJson(checked) + "\"";
+    }
+
+    private static String checkedLightClaimToken(String token) {
+        if (token == null) return null;
+        String checked = requireText(token, "lightClaimToken");
+        if (checked.length() > 128) throw new IllegalArgumentException("lightClaimToken is too long");
+        return checked;
     }
 
     public static Message interactionRelease(String sessionId, long seq, long sentAtMillis,
@@ -1175,6 +1251,111 @@ public final class CoopMessages {
     public static Message baseSet(String sessionId, long seq, long sentAtMillis, String encodedSet) {
         return new Message(Type.BASE_SET, requireText(sessionId, "sessionId"), seq, sentAtMillis,
                 "{\"bases\":\"" + escapeJson(encodedSet == null ? "" : encodedSet) + "\"}");
+    }
+
+    public static Message encounterSet(String sessionId, long seq, long sentAtMillis, String encodedSet) {
+        return new Message(Type.ENC_SET, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"encounters\":\"" + escapeJson(encodedSet == null ? "" : encodedSet) + "\"}");
+    }
+
+    public static Message encounterSet(String sessionId, long seq, long sentAtMillis,
+                                       String encodedSet, String encodedOrbits) {
+        return new Message(Type.ENC_SET, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"encounters\":\"" + escapeJson(encodedSet == null ? "" : encodedSet)
+                        + "\",\"orbits\":\"" + escapeJson(requireText(encodedOrbits, "orbits")) + "\"}");
+    }
+
+    /** Phase 26 id manifest; an empty manifest removes every tagged guest replica. */
+    public static Message streamSet(String sessionId, long seq, long sentAtMillis, String encodedIds) {
+        return new Message(Type.STREAM_SET, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"streams\":\"" + escapeJson(encodedIds == null ? "" : encodedIds) + "\"}");
+    }
+
+    public static Message streamAdd(String sessionId, long seq, long sentAtMillis, String encodedStream) {
+        return new Message(Type.STREAM_ADD, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"stream\":\"" + escapeJson(requireText(encodedStream, "stream")) + "\"}");
+    }
+
+    public static Message streamDespawn(String sessionId, long seq, long sentAtMillis,
+                                        String encodedDespawn) {
+        return new Message(Type.STREAM_DESPAWN, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"stream\":\"" + escapeJson(requireText(encodedDespawn, "stream")) + "\"}");
+    }
+
+    public static Message streamRemove(String sessionId, long seq, long sentAtMillis, String streamId) {
+        // Validate presence without trimming identity bytes that the record/manifest preserved.
+        requireText(streamId, "streamId");
+        return new Message(Type.STREAM_REMOVE, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"streamId\":\"" + escapeJson(streamId) + "\"}");
+    }
+
+    // ---- Shared floating hyperspace wrecks -------------------------------------------------------
+    public static Message wreckSet(String sessionId, long seq, long sentAtMillis, String encodedIds) {
+        return new Message(Type.WRECK_SET, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"wrecks\":\"" + escapeJson(encodedIds == null ? "" : encodedIds) + "\"}");
+    }
+
+    public static Message wreckAdd(String sessionId, long seq, long sentAtMillis, String encoded) {
+        return wreckAdd(sessionId, seq, sentAtMillis, encoded, 0);
+    }
+
+    public static Message wreckAdd(String sessionId, long seq, long sentAtMillis, String encoded, long revision) {
+        if (revision < 0) throw new IllegalArgumentException("Negative wreck revision");
+        return new Message(Type.WRECK_ADD, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"wreck\":\"" + escapeJson(requireText(encoded, "wreck")) + "\",\"revision\":" + revision + "}");
+    }
+
+    public static Message wreckRemove(String sessionId, long seq, long sentAtMillis, String id) {
+        requireText(id, "wreckId");
+        return new Message(Type.WRECK_REMOVE, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"wreckId\":\"" + escapeJson(id) + "\"}");
+    }
+
+    public static Message wreckConsume(String sessionId, long seq, long sentAtMillis, String encodedIds) {
+        return new Message(Type.WRECK_CONSUME, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"wrecks\":\"" + escapeJson(requireText(encodedIds, "wrecks")) + "\"}");
+    }
+
+    public static Message wreckMutation(String sessionId, long seq, long sentAtMillis, String encoded) {
+        return new Message(Type.WRECK_MUTATION, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"mutation\":\"" + escapeJson(requireText(encoded, "mutation")) + "\"}");
+    }
+
+    public static Message wreckMutationAck(String sessionId, long seq, long sentAtMillis, String encoded) {
+        return new Message(Type.WRECK_MUTATION_ACK, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"ack\":\"" + escapeJson(requireText(encoded, "ack")) + "\"}");
+    }
+
+    // ---- Phase 26 M3: Host-owned abyssal lights --------------------------------------------------
+    public static Message lightSet(String sessionId, long seq, long sentAtMillis, String encoded) {
+        return new Message(Type.LIGHT_SET, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"lights\":\"" + escapeJson(requireText(encoded, "lights")) + "\"}");
+    }
+
+    public static Message lightRequest(String sessionId, long seq, long sentAtMillis, String encoded) {
+        return new Message(Type.LIGHT_REQUEST, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"request\":\"" + escapeJson(requireText(encoded, "request")) + "\"}");
+    }
+
+    public static Message lightResult(String sessionId, long seq, long sentAtMillis, String encoded) {
+        return new Message(Type.LIGHT_RESULT, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"result\":\"" + escapeJson(requireText(encoded, "result")) + "\"}");
+    }
+
+    // ---- Phase 26 M4: Host-owned hyperspace storms ------------------------------------------------
+    public static Message stormSet(String sessionId, long seq, long sentAtMillis, String encoded) {
+        return new Message(Type.STORM_SET, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"storm\":\"" + escapeJson(requireText(encoded, "storm")) + "\"}");
+    }
+
+    public static Message stormGrid(String sessionId, long seq, long sentAtMillis, String encoded) {
+        return new Message(Type.STORM_GRID, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"storm\":\"" + escapeJson(requireText(encoded, "storm")) + "\"}");
+    }
+
+    public static Message stormControl(String sessionId, long seq, long sentAtMillis, String encoded) {
+        return new Message(Type.STORM_CONTROL, requireText(sessionId, "sessionId"), seq, sentAtMillis,
+                "{\"control\":\"" + escapeJson(requireText(encoded, "control")) + "\"}");
     }
 
     // ---- Phase 21: lobby / ready-up ---------------------------------------------------------------

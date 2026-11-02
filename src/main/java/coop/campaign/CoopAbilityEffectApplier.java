@@ -53,8 +53,9 @@ public final class CoopAbilityEffectApplier {
         /**
          * A world-affecting ability with no host-side implementation yet. Today that is
          * {@code remote_survey} (surveys a planet the guest is near: needs the survey-level write to
-         * ride a WORLD_DELTA, not a mirror activation) and {@code generate_slipsurge} (Phase 26 owns
-         * slipstream replication), plus any modded id the arbiter defaulted to world-affecting.
+         * ride a WORLD_DELTA, not a mirror activation) and {@code generate_slipsurge} (guest surges
+         * stay guest-local by the Phase 26 decision), plus any modded id the arbiter defaulted to
+         * world-affecting.
          */
         SKIP_UNHANDLED
     }

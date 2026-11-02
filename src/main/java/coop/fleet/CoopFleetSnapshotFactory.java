@@ -626,7 +626,7 @@ public final class CoopFleetSnapshotFactory {
         if (location == null) {
             return "";
         }
-        String id = location.getId();
+        String id = CoopLocations.keyOf(location);
         return id == null ? "" : id;
     }
 

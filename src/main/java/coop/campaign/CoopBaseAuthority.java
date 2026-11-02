@@ -12,6 +12,7 @@ import com.fs.starfarer.api.impl.campaign.intel.BaseIntelPlugin;
 import com.fs.starfarer.api.impl.campaign.intel.bases.LuddicPathBaseIntel;
 import com.fs.starfarer.api.impl.campaign.intel.bases.PirateActivityIntel;
 import com.fs.starfarer.api.impl.campaign.intel.bases.PirateBaseIntel;
+import coop.fleet.CoopLocations;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
 import coop.net.CoopNetService;
@@ -872,7 +873,7 @@ public final class CoopBaseAuthority {
                 return null;
             }
             for (StarSystemAPI system : systems) {
-                if (system != null && systemId.equals(system.getId())) {
+                if (system != null && systemId.equals(CoopLocations.keyOf(system))) {
                     return system;
                 }
             }
@@ -899,7 +900,7 @@ public final class CoopBaseAuthority {
                 if (system == null || tier == null) {
                     return null;
                 }
-                return CoopBaseRecord.pirate(system.getId(), factionId(pirate.getMarket()),
+                return CoopBaseRecord.pirate(CoopLocations.keyOf(system), factionId(pirate.getMarket()),
                         tier.name(), marketId(pirate.getMarket()));
             }
             if (intel instanceof LuddicPathBaseIntel path) {
@@ -910,7 +911,7 @@ public final class CoopBaseAuthority {
                 if (system == null) {
                     return null;
                 }
-                return CoopBaseRecord.pather(system.getId(), factionId(path.getMarket()),
+                return CoopBaseRecord.pather(CoopLocations.keyOf(system), factionId(path.getMarket()),
                         path.isLarge(), marketId(path.getMarket()));
             }
         } catch (RuntimeException | LinkageError ex) {

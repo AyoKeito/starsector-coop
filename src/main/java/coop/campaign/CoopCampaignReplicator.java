@@ -69,6 +69,8 @@ import coop.colony.CoopExpeditionWarningSync;
 import coop.colony.CoopRaidOutcomeSync;
 import coop.debug.CoopOwnFleetProbe;
 import coop.fleet.CoopGuestMirrorHandle;
+import coop.fleet.CoopLocations;
+import coop.fleet.CoopEntityIds;
 import coop.rewards.CoopRewardSplitter;
 import coop.ui.CoopFeed;
 import coop.net.CoopConnectionRole;
@@ -77,6 +79,7 @@ import coop.net.CoopNetService;
 import coop.session.CoopSessionState;
 import coop.util.CoopDebug;
 import coop.util.CoopLog;
+import org.lwjgl.util.vector.Vector2f;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
@@ -215,6 +218,7 @@ public final class CoopCampaignReplicator
     private int orbitSweepCursor;
     private int orbitSweepSystemsSent;
     private int orbitSweepJumpPointsSent;
+    private final CoopEncounterOrbitSweep encounterOrbitSweep;
 
     // Player faction standings: host re-broadcasts the full set on a slow cadence and the guest
     // force-matches it. Event-driven REP_DELTA covers host-side changes immediately; this snapshot is
@@ -403,6 +407,7 @@ public final class CoopCampaignReplicator
         this.service = Objects.requireNonNull(service, "service");
         this.session = Objects.requireNonNull(session, "session");
         this.clock = Objects.requireNonNull(clock, "clock");
+        this.encounterOrbitSweep = new CoopEncounterOrbitSweep(service, session);
         // Learning a mapping is the moment everything that was waiting on this base can proceed.
         marketIds.setListener(this::onMarketIdMapped);
         // Phase 32 addition B: the transport tells the credit transfer about every queued message it
@@ -1216,7 +1221,7 @@ public final class CoopCampaignReplicator
         String entityId = null;
         try {
             SectorEntityToken primary = market.getPrimaryEntity();
-            entityId = primary == null ? null : primary.getId();
+            entityId = CoopEntityIds.keyOf(primary);
         } catch (RuntimeException | LinkageError ex) {
             // A procgen/local market may have no primary entity; the market id alone still helps.
         }
@@ -4232,6 +4237,11 @@ public final class CoopCampaignReplicator
 
     private void applyWorldDeltaToEngine(CoopWorldDelta delta) {
         switch (delta.kind()) {
+            case ENCOUNTER_STATE -> {
+                CoopEncounterWorld.applyEntityState(Global.getSector(), delta.entityId(),
+                        CoopEncounterCodec.decodeEntityState(delta.newStateJson()));
+                return;
+            }
             case SPAWN -> {
                 applySpawnToEngine(delta);
                 return;
@@ -4749,7 +4759,7 @@ public final class CoopCampaignReplicator
         if (coopId != null && !String.valueOf(coopId).isBlank()) {
             return String.valueOf(coopId);
         }
-        return entity.getId();
+        return CoopEntityIds.keyOf(entity);
     }
 
     private void collectGateStates(LocationAPI location, boolean gatesActive, boolean canUseGates,
@@ -4762,7 +4772,7 @@ public final class CoopCampaignReplicator
             if (gate == null || gate.getId() == null) {
                 continue;
             }
-            out.put(gate.getId(), CoopSkeletonMutationWatcher.encodeGateState(
+            out.put(CoopEntityIds.keyOf(gate), CoopSkeletonMutationWatcher.encodeGateState(
                     GateEntityPlugin.isScanned(gate), gatesActive, canUseGates, canScanGates));
         }
     }
@@ -4794,11 +4804,11 @@ public final class CoopCampaignReplicator
             }
             MarketAPI.SurveyLevel level = market.getSurveyLevel();
             if (level != null) {
-                surveyOut.put(planet.getId(), level.name());
+                surveyOut.put(CoopEntityIds.keyOf(planet), level.name());
             }
             if (hasRuins(market)) {
                 MemoryAPI memory = market.getMemoryWithoutUpdate();
-                ruinsOut.put(planet.getId(), Boolean.toString(memory != null
+                ruinsOut.put(CoopEntityIds.keyOf(planet), Boolean.toString(memory != null
                         && memory.getBoolean(CoopSkeletonMutationWatcher.RUINS_EXPLORED_FLAG)));
             }
         }
@@ -5053,8 +5063,8 @@ public final class CoopCampaignReplicator
             }
             // Entering a new location: re-seed the baseline silently (the old location's entities are
             // "gone" only because the player moved, not because they were salvaged).
-            if (!Objects.equals(location.getId(), watchedLocationId)) {
-                watchedLocationId = location.getId();
+            if (!Objects.equals(CoopLocations.keyOf(location), watchedLocationId)) {
+                watchedLocationId = CoopLocations.keyOf(location);
                 trackedSalvageables.clear();
                 trackedSalvageables.addAll(current);
                 constructionScratch.clear();
@@ -5132,7 +5142,7 @@ public final class CoopCampaignReplicator
                 CoopLog.info(CoopCampaignReplicator.class, String.format(
                         "Coop orbit-dump id=%s type=%s focus=%s r=%.1f ang=%.2f period=%.2f pos=(%.1f,%.1f)",
                         e.getId(), e.getCustomEntityType(),
-                        e.getOrbitFocus() == null ? "-" : e.getOrbitFocus().getId(),
+                        e.getOrbitFocus() == null ? "-" : CoopEntityIds.keyOf(e.getOrbitFocus()),
                         e.getCircularOrbitRadius(), e.getCircularOrbitAngle(), e.getCircularOrbitPeriod(),
                         e.getLocation().x, e.getLocation().y));
             }
@@ -5174,8 +5184,8 @@ public final class CoopCampaignReplicator
      * clock reconciler. The periodic re-cover is the backstop for anything that is re-created or
      * re-orbited mid-session.
      *
-     * <p><b>Cost stays bounded.</b> At most three snapshots per tick: the host's location, the
-     * guest's when it differs, and one sweep system. The first two use the full
+     * <p><b>Cost stays bounded.</b> At most four snapshots per tick: the host's location, the
+     * guest's when it differs, one managed encounter and one jump-point sweep system. The first two use the full
      * {@link #syncableOrbitBodies} filter; the sweep one uses the jump-point-only filter
      * ({@link #jumpPointOrbitBodies}), so it is a handful of entries rather than a system's worth,
      * and a system already sent as a player location this tick is skipped rather than sent twice.
@@ -5183,7 +5193,8 @@ public final class CoopCampaignReplicator
      * null when no guest is paired or the mirror is not placed. The snapshots are separate
      * {@code ORBIT_SNAPSHOT} messages with their own {@code locationId} and the guest's
      * {@code applyOrbitSnapshot} is idempotent and location-keyed, so they land independently with
-     * no keying change and no new message type.
+     * no keying change and no new message type. The managed encounter turn also repairs original
+     * offscreen bodies, including a ghost's exact pose, after independent native batching.
      */
     public void tickOrbitSync() {
         if (!isHost() || !isActive()) {
@@ -5204,6 +5215,7 @@ public final class CoopCampaignReplicator
             boolean firstLocation = true;
             Set<String> sentThisTick = new HashSet<>();
             for (LocationAPI location : locations) {
+                sentThisTick.add(CoopLocations.keyOf(location));
                 List<SectorEntityToken> bodies = syncableOrbitBodies(location);
                 List<CoopOrbitSync.OrbitEntry> entries = orbitEntries(bodies);
                 // The breakdown tracks a single body count across ticks, so only the first location
@@ -5214,11 +5226,13 @@ public final class CoopCampaignReplicator
                     firstLocation = false;
                 }
                 if (!entries.isEmpty()) {
-                    sentThisTick.add(location.getId());
+                    sentThisTick.add(CoopLocations.keyOf(location));
                     send(CoopMessages.orbitSnapshot(session.sessionId(), service.nextSeq(), nowMillis,
-                            location.getId(), CoopOrbitSync.encode(entries)));
+                            CoopLocations.keyOf(location), CoopOrbitSync.encode(entries)));
                 }
             }
+            String encounterSent = encounterOrbitSweep.publishNext(sector, nowMillis, sentThisTick);
+            if (encounterSent != null) sentThisTick.add(encounterSent);
             tickOrbitSweep(sector, nowMillis, sentThisTick);
         } catch (RuntimeException | LinkageError ex) {
             CoopLog.warn(CoopCampaignReplicator.class, "Orbit sync capture failed", ex);
@@ -5242,7 +5256,7 @@ public final class CoopCampaignReplicator
         }
         List<String> systemIds = new ArrayList<>(systems.size());
         for (StarSystemAPI system : systems) {
-            systemIds.add(system == null ? null : system.getId());
+            systemIds.add(CoopLocations.keyOf(system));
         }
         OrbitSweepStep step = nextOrbitSweepSystem(systemIds, orbitSweepCursor, sentThisTick);
         orbitSweepCursor = step.nextCursor();
@@ -5253,7 +5267,7 @@ public final class CoopCampaignReplicator
                 orbitSweepSystemsSent++;
                 orbitSweepJumpPointsSent += entries.size();
                 send(CoopMessages.orbitSnapshot(session.sessionId(), service.nextSeq(), nowMillis,
-                        system.getId(), CoopOrbitSync.encode(entries)));
+                        CoopLocations.keyOf(system), CoopOrbitSync.encode(entries)));
                 if (CoopDebug.diagnosticsEnabled()) {
                     CoopLog.info(CoopCampaignReplicator.class, "Coop jump-point orbit sweep sent loc="
                             + system.getId() + " jumpPoints=" + entries.size());
@@ -5275,6 +5289,7 @@ public final class CoopCampaignReplicator
         orbitSweepCursor = 0;
         orbitSweepSystemsSent = 0;
         orbitSweepJumpPointsSent = 0;
+        encounterOrbitSweep.reset();
     }
 
     /**
@@ -5307,15 +5322,30 @@ public final class CoopCampaignReplicator
     }
 
     /** Captures the current circular orbit of each body, in the order given. */
-    private static List<CoopOrbitSync.OrbitEntry> orbitEntries(List<SectorEntityToken> bodies) {
+    static List<CoopOrbitSync.OrbitEntry> orbitEntries(List<SectorEntityToken> bodies) {
         List<CoopOrbitSync.OrbitEntry> entries = new ArrayList<>(bodies.size());
         for (SectorEntityToken e : bodies) {
-            String focusId = e.getOrbitFocus() == null ? null : e.getOrbitFocus().getId();
-            entries.add(new CoopOrbitSync.OrbitEntry(e.getId(), focusId,
+            String entityId = CoopEntityIds.keyOf(e);
+            String focusId = CoopEntityIds.keyOf(e.getOrbitFocus());
+            CoopOrbitSync.Pose pose = null;
+            if (isOwnedEncounterGhost(e, entityId)) {
+                Vector2f position = e.getLocation(), velocity = e.getVelocity();
+                pose = new CoopOrbitSync.Pose(position.x, position.y, velocity.x, velocity.y, e.getFacing());
+            }
+            entries.add(new CoopOrbitSync.OrbitEntry(entityId, focusId,
                     e.getCircularOrbitRadius(), e.getCircularOrbitPeriod(),
-                    e.getCircularOrbitAngle()));
+                    e.getCircularOrbitAngle(), pose));
         }
         return entries;
+    }
+
+    private static boolean isOwnedEncounterGhost(SectorEntityToken entity, String entityId) {
+        if (entityId == null || !entityId.startsWith("coopenc_") || !CoopWreckCodec.isNativeWreck(entity)) return false;
+        MemoryAPI memory = entity.getMemoryWithoutUpdate();
+        Object instance = memory == null ? null : memory.get(CoopEncounterWorld.ENCOUNTER_ID_KEY);
+        Object ghostType = memory == null ? null : memory.get("$gsType");
+        return instance instanceof String text && entityId.startsWith("coopenc_" + text + "_")
+                && ghostType instanceof String type && !type.isEmpty();
     }
 
     /**
@@ -5346,8 +5376,8 @@ public final class CoopCampaignReplicator
         if (a == null || b == null) {
             return false;
         }
-        String aId = a.getId();
-        return aId != null && aId.equals(b.getId());
+        String aId = CoopLocations.keyOf(a);
+        return aId != null && aId.equals(CoopLocations.keyOf(b));
     }
 
     /** Guest: snap local orbiting bodies to the host's angles (string-id first, then orbit signature). */
@@ -5368,7 +5398,7 @@ public final class CoopCampaignReplicator
         LocationAPI location = null;
         for (CoopOrbitSync.OrbitEntry entry : entries) {
             if (CoopOrbitSync.isStableId(entry.entityId())) {
-                SectorEntityToken token = sector.getEntityById(entry.entityId());
+                SectorEntityToken token = CoopEntityIds.byId(sector, entry.entityId());
                 if (token != null && token.getContainingLocation() != null) {
                     location = token.getContainingLocation();
                     break;
@@ -5394,7 +5424,7 @@ public final class CoopCampaignReplicator
             // ties like the planet 'barad' sharing an orbit with the hex-id nav buoy.)
             Map<String, List<SectorEntityToken>> bySignature = new HashMap<>();
             for (SectorEntityToken e : syncableOrbitBodies(location)) {
-                String focusId = e.getOrbitFocus() == null ? null : e.getOrbitFocus().getId();
+                String focusId = CoopEntityIds.keyOf(e.getOrbitFocus());
                 bySignature.computeIfAbsent(
                         CoopOrbitSync.signature(focusId, e.getCircularOrbitRadius(), e.getCircularOrbitPeriod()),
                         k -> new ArrayList<>()).add(e);
@@ -5408,7 +5438,7 @@ public final class CoopCampaignReplicator
             Map<String, SectorEntityToken> localById = new HashMap<>();
             for (SectorEntityToken e : location.getAllEntities()) {
                 if (e != null && e.getId() != null) {
-                    localById.putIfAbsent(e.getId(), e);
+                    localById.putIfAbsent(CoopEntityIds.keyOf(e), e);
                 }
             }
             int snapped = 0;
@@ -5446,7 +5476,7 @@ public final class CoopCampaignReplicator
             return null;
         }
         for (StarSystemAPI system : systems) {
-            if (system != null && locationId.equals(system.getId())) {
+            if (system != null && locationId.equals(CoopLocations.keyOf(system))) {
                 return system;
             }
         }
@@ -5478,23 +5508,34 @@ public final class CoopCampaignReplicator
      * — a non-deterministically generated orbit like the fringe jump-point — reset the whole circular
      * orbit so distance and angle both match the host.
      */
-    private void applyOrbitTo(SectorEntityToken local, CoopOrbitSync.OrbitEntry entry,
+    static void applyOrbitTo(SectorEntityToken local, CoopOrbitSync.OrbitEntry entry,
                               Map<String, SectorEntityToken> localById, SectorAPI sector) {
+        if (entry.pose() != null && (!entry.entityId().equals(CoopEntityIds.keyOf(local))
+                || !isOwnedEncounterGhost(local, entry.entityId())))
+            throw new IllegalArgumentException("Exact orbit pose target is not the shared native ghost");
         boolean orbitGeometryDiffers = Math.abs(local.getCircularOrbitRadius() - entry.radius()) > 1f
                 || Math.abs(local.getCircularOrbitPeriod() - entry.period()) > 0.5f;
+        boolean installedOrbit = false;
         if (orbitGeometryDiffers) {
             // Rare branch (non-deterministic orbit like the fringe jump-point), so the sector-wide
             // lookup fallback is affordable here; the location map still catches the common case.
             SectorEntityToken focus = localById.get(entry.focusId());
             if (focus == null && entry.focusId() != null) {
-                focus = sector.getEntityById(entry.focusId());
+                focus = CoopEntityIds.byId(sector, entry.focusId());
             }
             if (focus != null) {
                 local.setCircularOrbit(focus, entry.angle(), entry.radius(), entry.period());
-                return;
+                installedOrbit = true;
             }
         }
-        local.setCircularOrbitAngle(entry.angle());
+        if (!installedOrbit) local.setCircularOrbitAngle(entry.angle());
+        // Native Dire hints may place a new ghost at its focus after installing its orbit.
+        // Keep the current Host result even while paused; future snapshots still advance its phase.
+        if (entry.pose() != null) {
+            CoopOrbitSync.Pose pose = entry.pose();
+            local.setLocation(pose.x(), pose.y()); local.getVelocity().set(pose.vx(), pose.vy());
+            local.setFacing(pose.facing());
+        }
     }
 
     /**
@@ -5536,7 +5577,7 @@ public final class CoopCampaignReplicator
 
     private boolean isSyncableOrbit(SectorEntityToken e) {
         return hasCircularOrbit(e)
-                && (CoopOrbitSync.isStableId(e.getId()) || e instanceof JumpPointAPI || e instanceof PlanetAPI);
+                && (CoopOrbitSync.isStableId(CoopEntityIds.keyOf(e)) || e instanceof JumpPointAPI || e instanceof PlanetAPI);
     }
 
     /** The part of the orbit-sync filter that is about the orbit rather than about the body. */
@@ -5599,7 +5640,7 @@ public final class CoopCampaignReplicator
 
     private void removeFromSignaturePool(Map<String, List<SectorEntityToken>> bySignature,
                                          SectorEntityToken e) {
-        String focusId = e.getOrbitFocus() == null ? null : e.getOrbitFocus().getId();
+        String focusId = CoopEntityIds.keyOf(e.getOrbitFocus());
         List<SectorEntityToken> list = bySignature.get(
                 CoopOrbitSync.signature(focusId, e.getCircularOrbitRadius(), e.getCircularOrbitPeriod()));
         if (list != null) {
@@ -5649,7 +5690,7 @@ public final class CoopCampaignReplicator
                 return String.valueOf(coopId);
             }
         }
-        return entity.getId();
+        return CoopEntityIds.keyOf(entity);
     }
 
     /** Pure decision function (unit-tested) behind {@link #consumeKeyIfTracked}. */
@@ -5663,7 +5704,7 @@ public final class CoopCampaignReplicator
 
     /** Finds a replicated entity by coop id, falling back to the engine id for worldgen entities. */
     private SectorEntityToken findEntityForDelta(SectorAPI sector, String entityId) {
-        SectorEntityToken byEngineId = sector.getEntityById(entityId);
+        SectorEntityToken byEngineId = CoopEntityIds.byId(sector, entityId);
         if (byEngineId != null) {
             return byEngineId;
         }
@@ -5703,7 +5744,7 @@ public final class CoopCampaignReplicator
             CoopWorldEntitySpawn spawn = new CoopWorldEntitySpawn(
                     coopEntityId,
                     Entities.CARGO_PODS,
-                    location.getId(),
+                    CoopLocations.keyOf(location),
                     pods.getLocation() == null ? 0f : pods.getLocation().x,
                     pods.getLocation() == null ? 0f : pods.getLocation().y,
                     pods.getVelocity() == null ? 0f : pods.getVelocity().x,
@@ -5782,13 +5823,13 @@ public final class CoopCampaignReplicator
             SectorEntityToken focus = built.getOrbitFocus();
             CoopWorldEntitySpawn.Orbit orbit = focus == null || focus.getId() == null
                     ? CoopWorldEntitySpawn.Orbit.NONE
-                    : new CoopWorldEntitySpawn.Orbit(focus.getId(), built.getCircularOrbitAngle(),
+                    : new CoopWorldEntitySpawn.Orbit(CoopEntityIds.keyOf(focus), built.getCircularOrbitAngle(),
                             built.getCircularOrbitRadius(), built.getCircularOrbitPeriod());
             FactionAPI faction = built.getFaction();
             CoopWorldEntitySpawn spawn = new CoopWorldEntitySpawn(
                     coopEntityId,
                     built.getCustomEntityType(),
-                    location.getId(),
+                    CoopLocations.keyOf(location),
                     built.getLocation() == null ? 0f : built.getLocation().x,
                     built.getLocation() == null ? 0f : built.getLocation().y,
                     0f, 0f,
@@ -6043,12 +6084,12 @@ public final class CoopCampaignReplicator
             return null;
         }
         for (LocationAPI location : sector.getAllLocations()) {
-            if (location != null && locationId.equals(location.getId())) {
+            if (location != null && locationId.equals(CoopLocations.keyOf(location))) {
                 return location;
             }
         }
         LocationAPI hyperspace = sector.getHyperspace();
-        return hyperspace != null && locationId.equals(hyperspace.getId()) ? hyperspace : null;
+        return hyperspace != null && locationId.equals(CoopLocations.keyOf(hyperspace)) ? hyperspace : null;
     }
 
     /** Test seam: replaces the {@code COLONY_MGMT} engine write, so a test can make it fail. */
@@ -6258,6 +6299,33 @@ public final class CoopCampaignReplicator
                     + (member.getId() == null ? "?" : member.getId()), ex);
             return null;
         }
+    }
+
+    /** Captures a derelict's variant before recovery has created a fleet member. */
+    static CoopShipDetail captureWreckVariant(ShipVariantAPI variant) {
+        return captureVariantDetail(Objects.requireNonNull(variant, "variant"),
+                "", "", 0f, 1f, 0, null);
+    }
+
+    /** Rebuilds a derelict's private variant without creating or registering a fleet member. */
+    static ShipVariantAPI rebuildWreckVariant(CoopShipDetail detail) {
+        Objects.requireNonNull(detail, "detail");
+        ShipVariantAPI stock = stockVariantOrNull(detail.baseVariantId());
+        ShipVariantAPI variant;
+        if (stock != null) {
+            variant = stock.clone();
+        } else {
+            ShipHullSpecAPI hull = hullSpecOrNull(detail.hullSpecId());
+            if (hull == null) {
+                throw new IllegalArgumentException("Unknown wreck hull " + detail.hullSpecId()
+                        + " and variant " + detail.baseVariantId());
+            }
+            variant = Global.getSettings().createEmptyVariant(detail.baseVariantId(), hull);
+        }
+        variant.setSource(VariantSource.REFIT);
+        variant.setOriginalVariant(null);
+        applyVariantDetail(variant, detail);
+        return variant;
     }
 
     /**

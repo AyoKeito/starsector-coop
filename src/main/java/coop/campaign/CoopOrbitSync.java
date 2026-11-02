@@ -20,7 +20,17 @@ public final class CoopOrbitSync {
     private CoopOrbitSync() {
     }
 
-    public record OrbitEntry(String entityId, String focusId, float radius, float period, float angle) {
+    /** Exact native ghost placement can temporarily differ from its installed circular orbit. */
+    public record Pose(float x, float y, float vx, float vy, float facing) {
+        public Pose {
+            if (!Float.isFinite(x) || !Float.isFinite(y) || !Float.isFinite(vx) || !Float.isFinite(vy) || !Float.isFinite(facing)
+                    || Math.abs(x) > 1_000_000f || Math.abs(y) > 1_000_000f
+                    || Math.abs(vx) > 100_000f || Math.abs(vy) > 100_000f || Math.abs(facing) > 1_000_000f)
+                throw new IllegalArgumentException("Orbit pose out of bounds");
+        }
+    }
+
+    public record OrbitEntry(String entityId, String focusId, float radius, float period, float angle, Pose pose) {
         /**
          * A focus-less body writes its null {@code focusId} as the empty field {@link CoopDelimited}
          * emits for a null, and {@link #decode} hands that {@code ""} straight back. Normalizing it
@@ -32,6 +42,11 @@ public final class CoopOrbitSync {
          */
         public OrbitEntry {
             focusId = focusId == null || focusId.isEmpty() ? null : focusId;
+            if (pose != null && (entityId == null || !entityId.startsWith("coopenc_")))
+                throw new IllegalArgumentException("Exact orbit pose requires an encounter entity key");
+        }
+        public OrbitEntry(String entityId, String focusId, float radius, float period, float angle) {
+            this(entityId, focusId, radius, period, angle, null);
         }
     }
 
@@ -68,6 +83,9 @@ public final class CoopOrbitSync {
                     .append('|').append(e.radius())
                     .append('|').append(e.period())
                     .append('|').append(e.angle());
+            if (e.pose() != null) sb.append('|').append(e.pose().x())
+                    .append('|').append(e.pose().y()).append('|').append(e.pose().vx()).append('|').append(e.pose().vy())
+                    .append('|').append(e.pose().facing());
         }
         return sb.toString();
     }
@@ -85,8 +103,11 @@ public final class CoopOrbitSync {
             if (f.size() < 5) {
                 continue;
             }
+            if (f.size() != 5 && f.size() != 10) throw new IllegalArgumentException("Partial or unsupported orbit pose");
+            Pose pose = f.size() == 10 ? new Pose(Float.parseFloat(f.get(5)), Float.parseFloat(f.get(6)),
+                    Float.parseFloat(f.get(7)), Float.parseFloat(f.get(8)), Float.parseFloat(f.get(9))) : null;
             entries.add(new OrbitEntry(f.get(0), f.get(1),
-                    Float.parseFloat(f.get(2)), Float.parseFloat(f.get(3)), Float.parseFloat(f.get(4))));
+                    Float.parseFloat(f.get(2)), Float.parseFloat(f.get(3)), Float.parseFloat(f.get(4)), pose));
         }
         return entries;
     }

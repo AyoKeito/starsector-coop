@@ -96,7 +96,7 @@ public class CoopNetService {
      * by the receiver — the guest's mirror population froze. Must match on both installs (handshake
      * enforces same build). {@link #WARN_FRAME_BYTES} gives the early warning before this cliff.
      */
-    static final int MAX_FRAME_BYTES = 1024 * 1024;
+    public static final int MAX_FRAME_BYTES = 1024 * 1024;
     /** Soft threshold: an outbound frame this big logs once per message type, so growth is loud. */
     private static final int WARN_FRAME_BYTES = 256 * 1024;
     /** UDP receive buffer — sized for the datagram path, not the TCP frame cap. */

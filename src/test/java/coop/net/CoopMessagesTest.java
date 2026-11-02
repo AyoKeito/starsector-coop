@@ -19,6 +19,86 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoopMessagesTest {
     @Test
+    void lightFactoriesPreserveNestedEscapingAndPayloadNames() {
+        String encoded = "LIGHT:line\n\"quoted\"\\slash\t界";
+        List<CoopMessages.Message> messages = List.of(
+                CoopMessages.lightSet("session-a", 1, 12, encoded),
+                CoopMessages.lightRequest("session-a", 2, 12, encoded),
+                CoopMessages.lightResult("session-a", 3, 12, encoded));
+        List<String> fields = List.of("lights", "request", "result");
+        List<CoopMessages.Type> types = List.of(CoopMessages.Type.LIGHT_SET,
+                CoopMessages.Type.LIGHT_REQUEST, CoopMessages.Type.LIGHT_RESULT);
+        for (int i = 0; i < messages.size(); i++) {
+            CoopMessages.Message original = messages.get(i).withSenderId("host-player");
+            CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(original));
+            assertEquals(original, decoded);
+            assertEquals(types.get(i), decoded.type());
+            assertEquals(Map.of(fields.get(i), encoded), CoopMessages.decodePayload(decoded));
+            assertEquals("host-player", decoded.senderId());
+        }
+    }
+
+    @Test
+    void lightFactoriesRequireSessionAndNonemptyPayload() {
+        assertThrows(NullPointerException.class, () -> CoopMessages.lightSet(null, 1, 2, "recipe"));
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.lightRequest("", 1, 2, "request"));
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.lightResult("s", 1, 2, " "));
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.lightSet("s", 1, 2, ""));
+    }
+
+    @Test
+    void dwellerClaimTokenRoundTripsWithoutChangingOrdinaryInteractionPayloads() {
+        String token = "10000000-0000-0000-0000-000000000001";
+        List<CoopMessages.Message> correlated = List.of(
+                CoopMessages.interactionClaim("s", 1, 2, "light:1", "Abyssal Light", "guest", token),
+                CoopMessages.interactionAccept("s", 2, 2, "light:1", "guest", "Abyssal Light", 3, token),
+                CoopMessages.interactionReject("s", 3, 2, "light:1", "busy", token));
+        for (CoopMessages.Message message : correlated) {
+            CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(message));
+            assertEquals(message, decoded); assertEquals(token, CoopMessages.interactionLightClaimToken(decoded));
+        }
+        List<CoopMessages.Message> ordinary = List.of(
+                CoopMessages.interactionClaim("s", 1, 2, "planet", "Planet", "guest"),
+                CoopMessages.interactionAccept("s", 2, 2, "planet", "guest", "Planet", 3),
+                CoopMessages.interactionReject("s", 3, 2, "planet", "busy"));
+        for (CoopMessages.Message message : ordinary) {
+            assertFalse(CoopMessages.decodePayload(message).containsKey("lightClaimToken"));
+            assertNull(CoopMessages.interactionLightClaimToken(message));
+        }
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.interactionClaim("s", 1, 2, "light:1", "Light", "guest", " "));
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.interactionAccept("s", 1, 2, "light:1", "guest", "Light", 3, "x".repeat(129)));
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.interactionLightClaimToken(
+                new CoopMessages.Message(CoopMessages.Type.INTERACTION_ACCEPT, "s", 1, 2, "{\"lightClaimToken\":123}")));
+    }
+
+    @Test
+    void wreckFactoriesRoundTripTheCompleteRecipeAndCanonicalIds() {
+        String ids = coop.campaign.CoopWreckRecord.encodeIds(List.of("wreck:a", "wreck:b"));
+        String recipe = coop.campaign.CoopWreckFixtures.sample("wreck:a").encode();
+        List<CoopMessages.Message> messages = List.of(
+                CoopMessages.wreckSet("session-a", 7, 123, ids),
+                CoopMessages.wreckAdd("session-a", 8, 123, recipe),
+                CoopMessages.wreckRemove("session-a", 9, 123, "wreck:a"),
+                CoopMessages.wreckConsume("session-a", 10, 123, ids),
+                CoopMessages.wreckAdd("session-a", 11, 123, recipe, 42),
+                CoopMessages.wreckMutation("session-a", 12, 123, "opaque-mut:line\n\"quoted\""),
+                CoopMessages.wreckMutationAck("session-a", 13, 123, "opaque-ack:line\n\"quoted\""));
+        for (CoopMessages.Message original : messages) {
+            CoopMessages.Message decoded = CoopMessages.decode(CoopMessages.encode(original));
+            assertEquals(original, decoded);
+        }
+        assertEquals(ids, CoopMessages.requiredPayloadString(messages.get(0), "wrecks"));
+        assertEquals(coop.campaign.CoopWreckFixtures.sample("wreck:a"), coop.campaign.CoopWreckRecord.decode(
+                CoopMessages.requiredPayloadString(messages.get(1), "wreck")));
+        assertEquals("wreck:a", CoopMessages.requiredPayloadString(messages.get(2), "wreckId"));
+        assertEquals(ids, CoopMessages.requiredPayloadString(messages.get(3), "wrecks"));
+        assertEquals(42L, CoopMessages.requiredPayloadLong(messages.get(4), "revision"));
+        assertEquals("opaque-mut:line\n\"quoted\"", CoopMessages.requiredPayloadString(messages.get(5), "mutation"));
+        assertEquals("opaque-ack:line\n\"quoted\"", CoopMessages.requiredPayloadString(messages.get(6), "ack"));
+        assertThrows(IllegalArgumentException.class, () -> CoopMessages.wreckAdd("session-a", 14, 123, recipe, -1));
+    }
+
+    @Test
     void pingMessageEncodesDeterministicEnvelopeJson() {
         CoopMessages.Message ping = CoopMessages.ping("session-a", 7L, 123456789L);
 

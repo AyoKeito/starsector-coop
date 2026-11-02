@@ -1415,6 +1415,9 @@ public final class CoopBattleBridge {
             if (fleet == null) {
                 continue;
             }
+            if (coop.ambient.CoopLightBridge.isEncounterFleet(fleet)) {
+                continue;
+            }
             String mirrorId = mirrorCoopFleetId(fleet);
             if (!mirrorId.isEmpty()) {
                 ids.add(mirrorId);
