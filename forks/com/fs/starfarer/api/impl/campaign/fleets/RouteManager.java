@@ -2,9 +2,9 @@
  * ==========================================================================================
  * COOP FORK - DO NOT EDIT GAMEPLAY LOGIC. Targeted guest-presence fork only.
  * ------------------------------------------------------------------------------------------
- * Starsector version : 0.98a-RC8
+ * Starsector version : 0.98.5a-RC5
  * Original source     : starfarer.api.zip!/com/fs/starfarer/api/impl/campaign/fleets/RouteManager.java
- *                       (byte-identical copy of the 0.98a-RC8 source; verified before editing)
+ *                       (byte-identical copy of the 0.98.5a-RC5 source; verified before editing)
  * Compiled into       : mods/coop/jars/coop-forks.jar (prepended to vmparams -classpath
  *                       ahead of starfarer.api.jar so the JVM resolves this copy first).
  *
@@ -31,7 +31,7 @@
  *                                                     minimum over {player, presence}
  *   - new static : coopPresence()
  *
- * Version drift guard: this fork mirrors 0.98a-RC8 line for line. On first use of the presence
+ * Version drift guard: this fork mirrors 0.98.5a-RC5 line for line. On first use of the presence
  * term the running game version is checked against CoopPresenceRegistry.PINNED_VERSION; on a
  * mismatch one loud warning is logged and the presence term is disabled for the process, leaving
  * stock behaviour. The guard is shared by every presence fork (see the registry class).
@@ -287,8 +287,18 @@ public class RouteManager implements FleetEventListener {
 			if (id == null) return 0;
 			return id;
 		}
-		
-		
+		public float getElapsed() {
+			return elapsed;
+		}
+		public float getDaysMax() {
+			return daysMax;
+		}
+		public void setElapsed(float elapsed) {
+			this.elapsed = elapsed;
+		}
+		public void setDaysMax(float daysMax) {
+			this.daysMax = daysMax;
+		}
 	}
 	
 	
@@ -864,8 +874,11 @@ public class RouteManager implements FleetEventListener {
 		}
 	}
 	
-	
-	
+	public List<RouteData> getRoutes() {
+		return routes;
+	}
+
+
 	public void reportFleetDespawnedToListener(CampaignFleetAPI fleet, FleetDespawnReason reason, Object param) {
 		if (reason == FleetDespawnReason.PLAYER_FAR_AWAY) {
 			return;

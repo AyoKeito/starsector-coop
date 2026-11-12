@@ -19,9 +19,8 @@ startup and writes what happened to the log.
 A VPN can bypass carrier NAT without router changes, but both PCs still need a working VPN route
 and firewall access. If you prefer to avoid router setup, start there.
 
-Both PCs must run the same packaged build, including when testing a preview. Install a **Pre-release**
-manually from its release page; the launcher's stable update check does not offer it. See
-[INSTALL.md](INSTALL.md#2-unpack-the-mod).
+Both PCs need Starsector 0.98.5a-RC5 and the same packaged co-op build. Install the preview ZIP
+manually from its release page. See [INSTALL.md](INSTALL.md#2-unpack-the-mod).
 
 Before you load anything, find out whether the two of you can reach each other: the host presses
 **Check connection** in `Coop Launcher.cmd` and stays open, then the guest presses **Check connection** with the invite pasted in. Both are described in the next section.

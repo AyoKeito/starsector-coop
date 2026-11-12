@@ -103,6 +103,16 @@ public class DerelictShipEntityPlugin extends BaseCustomEntityPlugin {
 		picker.add(ShipCondition.GOOD, 5f);
 		picker.add(ShipCondition.PRISTINE, 1f);
 		
+		boolean reduceQuality = Misc.isExtended() && Global.getSettings().getBoolean("ext_reduceDerelictQuality");
+		if (reduceQuality) {
+			picker.clear();
+			picker.add(ShipCondition.WRECKED, 50f);
+			picker.add(ShipCondition.BATTERED, 25f);
+			picker.add(ShipCondition.AVERAGE, 7f);
+			picker.add(ShipCondition.GOOD, 3f);
+			picker.add(ShipCondition.PRISTINE, 1f);
+		}
+
 		return picker.pick();
 	}
 	
@@ -114,6 +124,13 @@ public class DerelictShipEntityPlugin extends BaseCustomEntityPlugin {
 		picker.add(ShipCondition.BATTERED, 10f);
 		picker.add(ShipCondition.AVERAGE, 3f);
 		
+		boolean reduceQuality = Misc.isExtended() && Global.getSettings().getBoolean("ext_reduceDerelictQuality");
+		if (reduceQuality) {
+			picker.clear();
+			picker.add(ShipCondition.WRECKED, 50f);
+			picker.add(ShipCondition.BATTERED, 25f);
+		}
+
 		return picker.pick();
 	}
 	
@@ -374,7 +391,7 @@ public class DerelictShipEntityPlugin extends BaseCustomEntityPlugin {
 	protected float elapsed = 0f; 
 	protected Boolean expiring = null;
 	public void advance(float amount) {
-		// COOP FORK (0.98a-RC8): replicated guest wrecks take motion/facing/expiry only from the host.
+		// COOP FORK (0.98.5a-RC5): replicated guest wrecks take motion/facing/expiry only from the host.
 		if (coop.ambient.CoopWreckBridge.isGuestReplica(entity)) return;
 		if (entity.isInCurrentLocation()) {
 			float turn = amount * angVel;

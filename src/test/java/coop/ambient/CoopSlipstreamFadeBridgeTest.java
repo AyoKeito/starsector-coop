@@ -36,7 +36,7 @@ class CoopSlipstreamFadeBridgeTest {
         previousSettings = Global.getSettings();
         previousSector = Global.getSector();
         CoopSlipstreamFadeBridge.clear();
-        setVersion("Starsector 0.98a-RC8");
+        setVersion("Starsector 0.98.5a-RC5");
     }
 
     @AfterEach
@@ -308,7 +308,7 @@ class CoopSlipstreamFadeBridgeTest {
         setVersion("0.99a-RC1");
         assertThrows(IllegalStateException.class, () -> CoopSlipstreamFadeBridge.register(f.plugin));
         assertFalse(CoopSlipstreamFadeBridge.isControlled(f.plugin));
-        setVersion("0.98a-RC8");
+        setVersion("0.98.5a-RC5");
         CoopSlipstreamFadeBridge.register(f.plugin);
         assertThrows(IllegalArgumentException.class,
                 () -> CoopSlipstreamFadeBridge.advanceControlled(f.plugin, Float.NaN, true, true));
@@ -336,7 +336,7 @@ class CoopSlipstreamFadeBridgeTest {
 
     @Test
     void pinnedNativeSaveFieldsContainNoBridgeState() {
-        assertEquals("0.98a-RC8/canonical-fade-1", SlipstreamTerrainPlugin2.coopFadeHookVersion());
+        assertEquals("0.98.5a-RC5/canonical-fade-1", SlipstreamTerrainPlugin2.coopFadeHookVersion());
         Set<String> waveFields = new HashSet<>();
         for (var field : SlipsurgeFadeInScript.class.getDeclaredFields()) {
             if (!Modifier.isStatic(field.getModifiers())) waveFields.add(field.getName());

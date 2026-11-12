@@ -1,6 +1,6 @@
 package com.fs.starfarer.api.impl.campaign.rulecmd;
 
-// COOP FORK BEGIN (0.98a-RC8): native light interaction bridge.
+// COOP FORK BEGIN (0.98.5a-RC5): native light interaction bridge.
 import coop.ambient.CoopLightBridge;
 import coop.ambient.CoopLightDeferredEngagement;
 // COOP FORK END
@@ -64,6 +64,7 @@ import com.fs.starfarer.api.util.WeightedRandomPicker;
 public class DwellerCMD extends BaseCommandPlugin {
 
 	public static enum DwellerStrength {
+		JUVENILE,
 		LOW,
 		MEDIUM,
 		HIGH,
@@ -75,6 +76,8 @@ public class DwellerCMD extends BaseCommandPlugin {
 	public static String SHROUDED_MAELSTROM = "shrouded_maelstrom";
 	public static String SHROUDED_MAW = "shrouded_maw";
 
+	public static float JUVENILE_SUBSTRATE_DROP_MULT = 5f;
+	public static float JUVENILE_SUBSTRATE_DROP_MULT_EXT = 10f;
 
 	public static ListMap<String> GUARANTEED_FIRST_TIME_ITEMS = new ListMap<>();
 	static {
@@ -110,7 +113,9 @@ public class DwellerCMD extends BaseCommandPlugin {
 		MemoryAPI memory = memoryMap.get(MemKeys.LOCAL);
 		if (memory == null) return false; // should not be possible unless there are other big problems already
 
-		if ("smallFleet".equals(action)) {
+		if ("juvenileFleet".equals(action)) {
+			return engageFleet(dialog, memoryMap, memory, DwellerStrength.JUVENILE, random);
+		} else if ("smallFleet".equals(action)) {
 			return engageFleet(dialog, memoryMap, memory, DwellerStrength.LOW, random);
 		} else if ("mediumFleet".equals(action)) {
 			return engageFleet(dialog, memoryMap, memory, DwellerStrength.MEDIUM, random);
@@ -268,8 +273,8 @@ public class DwellerCMD extends BaseCommandPlugin {
 	}
 
 
-	// COOP FORK BEGIN (0.98a-RC8): defer native combat until the shared claim is accepted.
-	protected boolean engageFleet(InteractionDialogAPI dialog, Map<String, MemoryAPI> memoryMap, MemoryAPI memory, DwellerStrength str, Random random) {
+	// COOP FORK BEGIN (0.98.5a-RC5): defer native combat until the shared claim is accepted.
+	protected boolean engageFleet(InteractionDialogAPI dialog, Map<String, MemoryAPI> memoryMap, MemoryAPI memory, final DwellerStrength str, Random random) {
 		SectorEntityToken light = dialog.getInteractionTarget();
 		CampaignFleetAPI player = Global.getSector().getPlayerFleet();
 		try {
@@ -282,7 +287,7 @@ public class DwellerCMD extends BaseCommandPlugin {
 		return engageFleetNow(dialog, memoryMap, memory, str, random);
 	}
 
-	protected boolean engageFleetNow(InteractionDialogAPI dialog, Map<String, MemoryAPI> memoryMap, MemoryAPI memory, DwellerStrength str, Random random) {
+	protected boolean engageFleetNow(InteractionDialogAPI dialog, Map<String, MemoryAPI> memoryMap, MemoryAPI memory, final DwellerStrength str, Random random) {
 	// COOP FORK END
 		CampaignFleetAPI fleet = createDwellerFleet(str, random);
 		if (fleet == null) return false;
@@ -292,7 +297,7 @@ public class DwellerCMD extends BaseCommandPlugin {
 
 		final SectorEntityToken entity = dialog.getInteractionTarget();
 
-		// COOP FORK BEGIN (0.98a-RC8): native manifestation has no Host NPC counterpart.
+		// COOP FORK BEGIN (0.98.5a-RC5): native manifestation has no Host NPC counterpart.
 		CoopLightBridge.markEncounterFleet(fleet, entity);
 		// COOP FORK END
 
@@ -303,7 +308,7 @@ public class DwellerCMD extends BaseCommandPlugin {
 		FIDConfig config = new FIDConfig();
 
 		config.delegate = new BaseFIDDelegate() {
-			// COOP FORK BEGIN (0.98a-RC8): remove surviving manifestations on leaving the dialog.
+			// COOP FORK BEGIN (0.98.5a-RC5): remove surviving manifestations on leaving the dialog.
 			@Override
 			public void notifyLeave(InteractionDialogAPI dialog) {
 				try { CoopLightBridge.discardEncounterFleet(fleet); }
@@ -324,6 +329,16 @@ public class DwellerCMD extends BaseCommandPlugin {
 				List<FleetMemberAPI> losses = new ArrayList<FleetMemberAPI>();
 				for (FleetMemberData fmd : data.getOwnCasualties()) {
 					losses.add(fmd.getMember());
+				}
+
+				float substrateMult = Misc.isExtended() ? Global.getSettings().getFloat("ext_substrateDropFraction") : 1f;
+
+				if (str == DwellerStrength.JUVENILE) {
+					if (Misc.isExtended()) {
+						substrateMult *= JUVENILE_SUBSTRATE_DROP_MULT_EXT;
+					} else {
+						substrateMult *= JUVENILE_SUBSTRATE_DROP_MULT;
+					}
 				}
 
 				float min = 0f;
@@ -358,6 +373,9 @@ public class DwellerCMD extends BaseCommandPlugin {
 						}
 					}
 				}
+
+				min *= substrateMult;
+				max *= substrateMult;
 
 				long seed = Misc.getSalvageSeed(entity);
 				Random random = Misc.getRandom(seed, 50);
@@ -456,9 +474,20 @@ public class DwellerCMD extends BaseCommandPlugin {
 		if (str == DwellerStrength.EXTREME) typeKey = FleetTypes.PATROL_LARGE;
 		f.setName(faction.getFleetTypeName(typeKey));
 
+		if (str == DwellerStrength.JUVENILE) {
+			f.setName("Feeble Manifestation");
+		}
+
 		f.setInflater(null);
 
-		if (str == DwellerStrength.LOW) {
+		if (str == DwellerStrength.JUVENILE) {
+			if (random.nextFloat() < 0.5f) {
+				addShips(f, 1, 1, random, ShipRoles.DWELLER_MAELSTROM);
+			} else {
+				addShips(f, 1, 1, random, ShipRoles.DWELLER_EYE);
+			}
+			addShips(f, 3, 4, random, ShipRoles.DWELLER_TENDRIL);
+		} else if (str == DwellerStrength.LOW) {
 			addShips(f, 6, 8, random, ShipRoles.DWELLER_TENDRIL);
 			addShips(f, 1, 1, random, ShipRoles.DWELLER_EYE);
 			addShips(f, 1, 2, random, ShipRoles.DWELLER_MAELSTROM);

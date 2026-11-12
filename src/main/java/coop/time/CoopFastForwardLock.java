@@ -7,6 +7,7 @@ import coop.util.CoopLog;
 
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.util.Objects;
 
 /**
@@ -33,17 +34,9 @@ import java.util.Objects;
  * {@link #enforceSessionState()} instead forces the multiplier to {@value #FALLBACK_MULT} using
  * public API only — exactly the old {@code settings.json} 1x lock, now applied at runtime.
  *
- * <p><b>Engine access notes (0.98a-RC8, pinned safe by the Phase 5 exact-version handshake).</b> All
- * of it is {@code java.lang.invoke} — {@code java.lang.reflect.*} is hard-blocked by the game's
- * script classloader and crashes in-game even though it compiles and unit-tests green (see
- * {@code CoopBarSync.resolveHandles()}, whose lazy-resolve + {@code Throwable}-catch shape this
- * copies). The toggle flag is the private static {@code boolean} field literally named
- * {@code class} on {@code com.fs.starfarer.settings.StarfarerSettings} (yes, the Java keyword; it is
- * distinct from the separate field {@code class.class}). Its accessors are {@code Oo0000()} (getter)
- * and {@code ö00000(boolean)} (setter, U+00F6 followed by five zeros) — recorded here for the record
- * only: we deliberately resolve the FIELD with {@code findStaticGetter}/{@code findStaticSetter}
- * rather than the methods, because five different static {@code (boolean)} setters on that class
- * print identically under {@code javap} and picking one by name is a coin flip.
+ * <p>The game's script classloader permits {@code java.lang.invoke} for resolving engine handles.
+ * On 0.98.5a-RC5, {@code CampaignState.processInput} reads toggle mode through
+ * {@code StarfarerSettings.Oo0000()}. The {@code if(boolean)} overload writes the same flag.
  */
 public final class CoopFastForwardLock {
 
@@ -283,16 +276,13 @@ public final class CoopFastForwardLock {
         if (ffGetter == null || ffSetter == null) {
             throw lastMiss != null ? lastMiss : new NoSuchFieldException("fastForward");
         }
-        // Class.forName is java.lang, not java.lang.reflect, so it is expected to pass the script
-        // sandbox the way privateLookupIn does.
         Class<?> settingsClass = Class.forName("com.fs.starfarer.settings.StarfarerSettings",
                 false, campaignStateClass.getClassLoader());
-        MethodHandles.Lookup settingsLookup =
-                MethodHandles.privateLookupIn(settingsClass, MethodHandles.lookup());
-        // The toggle-mode flag. Field, not method: see the class doc — Oo0000()/ö00000(boolean) are
-        // the accessors, but five distinct static (boolean) setters are indistinguishable by name.
-        MethodHandle toggleGetter = settingsLookup.findStaticGetter(settingsClass, "class", boolean.class);
-        MethodHandle toggleSetter = settingsLookup.findStaticSetter(settingsClass, "class", boolean.class);
+        MethodHandles.Lookup settingsLookup = MethodHandles.publicLookup();
+        MethodHandle toggleGetter = settingsLookup.findStatic(settingsClass, "Oo0000",
+                MethodType.methodType(boolean.class));
+        MethodHandle toggleSetter = settingsLookup.findStatic(settingsClass, "if",
+                MethodType.methodType(void.class, boolean.class));
         return new EngineHandles(campaignStateClass, ffGetter, ffSetter, toggleGetter, toggleSetter);
     }
 

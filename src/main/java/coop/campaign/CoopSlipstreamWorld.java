@@ -2,6 +2,7 @@ package coop.campaign;
 
 import com.fs.starfarer.api.EveryFrameScript;
 import com.fs.starfarer.api.Global;
+import com.fs.starfarer.api.campaign.CampaignClockAPI;
 import com.fs.starfarer.api.campaign.CampaignTerrainAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
@@ -597,13 +598,14 @@ public final class CoopSlipstreamWorld implements CoopSlipstreamAuthority.Stream
             beforeIds.add(terrain.getId());
         }
         String routeId = rearmed == null ? null : rearmed.id;
+        CampaignClockAPI clock = sector.getClock();
         if (rearmed == null) {
-            manager.addStream(sector.getClock().getMonth());
+            manager.addStream(clock.getMonth(), clock.getCycle());
         } else {
             boolean originalWasUsed = rearmed.wasUsed;
             rearmed.wasUsed = false;
             try {
-                manager.addStream(sector.getClock().getMonth());
+                manager.addStream(clock.getMonth(), clock.getCycle());
             } finally {
                 rearmed.wasUsed = originalWasUsed;
             }

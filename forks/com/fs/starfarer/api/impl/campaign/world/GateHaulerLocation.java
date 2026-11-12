@@ -2,7 +2,7 @@
  * ==========================================================================================
  * COOP FORK - DO NOT EDIT GAMEPLAY LOGIC. Targeted RNG determinism fork only.
  * ------------------------------------------------------------------------------------------
- * Starsector version : 0.98a-RC8
+ * Starsector version : 0.98.5a-RC5
  * Original source     : starfarer.api.zip!/com/fs/starfarer/api/impl/campaign/world/GateHaulerLocation.java
  * Compiled into       : mods/coop/jars/coop-forks.jar (classpath-prepended ahead of starfarer.api.jar).
  * RNG replacement:

@@ -22,6 +22,7 @@ import coop.session.CoopLobbyState;
 import coop.session.CoopPlayerInfo;
 import coop.session.CoopSessionState;
 import coop.time.CoopTimeLock;
+import coop.ui.CoopCampaignNotice;
 import coop.ui.CoopHudState;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -5087,6 +5088,56 @@ class CoopNetPumpTest {
 
         assertEquals(CoopConnectionRole.GUEST, service.role());
         assertTrue(memory.isEmpty());
+    }
+
+    @Test
+    void survivalSaveRefusesHostStartupBeforeOpeningThePort() {
+        List<CoopCampaignNotice> notices = new ArrayList<>();
+        Global.setSector(survivalSector(notices));
+        String saved = System.getProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY);
+        System.setProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY, "27015");
+        try {
+            StartupNetService service = new StartupNetService();
+            CoopNetPump pump = new CoopNetPump(service, new CoopSessionState(), () -> 1_000_000L);
+
+            pump.advance(0f);
+
+            assertEquals(0, service.startHostAttempts);
+            assertEquals(1, notices.size());
+            assertTrue(notices.get(0).message().contains("Load a Normal campaign save"));
+        } finally {
+            restoreProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY, saved);
+        }
+    }
+
+    @Test
+    void survivalSaveConsumesMemoryJoinFlagsWithoutConnecting() {
+        List<CoopCampaignNotice> notices = new ArrayList<>();
+        Global.setSector(survivalSector(notices));
+        java.util.Map<String, Object> memory = new java.util.HashMap<>();
+        memory.put("coop.connectHost", "10.0.0.5");
+        memory.put("coop.connectPort", 27015);
+        StartupNetService service = new StartupNetService();
+        CoopNetPump pump = new CoopNetPump(service, new CoopSessionState(), () -> 1_000_000L);
+
+        pump.consumeMemoryFlags(fakeMemory(memory));
+
+        assertEquals(CoopConnectionRole.NONE, service.role());
+        assertTrue(memory.isEmpty());
+        assertEquals(1, notices.size());
+    }
+
+    private static SectorAPI survivalSector(List<CoopCampaignNotice> notices) {
+        return (SectorAPI) Proxy.newProxyInstance(SectorAPI.class.getClassLoader(),
+                new Class<?>[]{SectorAPI.class}, (proxy, method, args) -> switch (method.getName()) {
+                    case "isExtMode" -> true;
+                    case "addTransientScript" -> {
+                        notices.add((CoopCampaignNotice) args[0]);
+                        yield null;
+                    }
+                    case "getMemoryWithoutUpdate" -> fakeMemory(new java.util.HashMap<>());
+                    default -> defaultValue(method.getReturnType());
+                });
     }
 
     /** A {@link MemoryAPI} over a map; only the methods the flag reader uses do anything. */

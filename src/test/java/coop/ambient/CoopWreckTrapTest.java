@@ -54,7 +54,7 @@ class CoopWreckTrapTest {
         previousSector = Global.getSector();
         CoopWreckBridge.clear();
         Global.setSettings(proxy(SettingsAPI.class,
-                Map.of("getVersionString", "Starsector 0.98a-RC8", "getColor", Color.WHITE)));
+                Map.of("getVersionString", "Starsector 0.98.5a-RC5", "getColor", Color.WHITE)));
         host = fleet(hyper, new Vector2f(1f, 2f));
         guest = fleet(hyper, new Vector2f(31000f, -12000f));
         TacticalModulePlugin tactical = (TacticalModulePlugin) Proxy.newProxyInstance(getClass().getClassLoader(),

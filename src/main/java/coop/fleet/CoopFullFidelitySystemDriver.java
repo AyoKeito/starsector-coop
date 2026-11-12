@@ -50,7 +50,7 @@ import java.util.List;
  *
  * <p><b>Fail-safe.</b> Everything reachable only through {@link MethodHandles} ({@code starSystems},
  * {@code frame}, and the two-argument {@code advance} pair whose second parameter is the obfuscated
- * class {@code com.fs.starfarer.util.A.new}) is resolved lazily on first use; {@code java.lang.reflect}
+ * class {@code com.fs.starfarer.util.super.OoOO}) is resolved lazily on first use; {@code java.lang.reflect}
  * is blocked by the script classloader, which is why this goes through {@code java.lang.invoke} -- the
  * proven {@code CoopBarSync} pattern. A resolve failure, or any
  * throw out of the drive, disables the feature permanently for the process after one warning and the
@@ -78,8 +78,8 @@ public final class CoopFullFidelitySystemDriver {
     private static final boolean ENABLED =
             Boolean.parseBoolean(System.getProperty(ENABLED_PROPERTY, "true"));
 
-    /** The obfuscated, unused second parameter of {@code BaseLocation.advance}. Always passed null. */
-    private static final String ADVANCE_PARAM_CLASS = "com.fs.starfarer.util.A.new";
+    /** The unused second parameter of {@code BaseLocation.advance} on 0.98.5a-RC5. */
+    private static final String ADVANCE_PARAM_CLASS = "com.fs.starfarer.util.super.OoOO";
 
     private static boolean handlesResolved;
     private static boolean permanentlyDisabled;

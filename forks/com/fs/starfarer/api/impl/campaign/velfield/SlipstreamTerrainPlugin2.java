@@ -1,5 +1,5 @@
 /*
- * COOP FORK - pinned Starsector 0.98a-RC8 canonical slipstream fade hook.
+ * COOP FORK - pinned Starsector 0.98.5a-RC5 canonical slipstream fade hook.
  * Original source: starfarer.api.zip!/com/fs/starfarer/api/impl/campaign/velfield/SlipstreamTerrainPlugin2.java
  * Raw native advancement skips only controlled faders, fade counters, and guest expiry.
  * A live Guest-local native surge also reports its weather source before clearing cells.
@@ -61,7 +61,7 @@ import com.fs.starfarer.api.util.WeightedRandomPicker;
 
 public class SlipstreamTerrainPlugin2 extends BaseTerrain {
 	// COOP FORK: method rather than constant so callers verify the loaded native class.
-	public static String coopFadeHookVersion() { return "0.98a-RC8/canonical-fade-1"; }
+	public static String coopFadeHookVersion() { return "0.98.5a-RC5/canonical-fade-1"; }
 
 	// COOP FORK: the bridge alone calls this instead of raw-frame fade advancement.
 	// Fader order and spawn/despawn implementations remain native; the host's location mode

@@ -23,10 +23,9 @@ import coop.util.CoopLog;
  * once and falls through to vanilla behaviour rather than breaking character creation.
  *
  * <p><b>Why the pinning is repeated.</b> The engine's new-game options panel
- * ({@code visual.showNewGameOptionsPanel}) is one atomic widget: name, portrait, gender, seed text,
- * sector size and star age, with no per-field API to disable. It writes seed, seedString, sectorSize
- * and sectorAge straight onto the {@link CharacterCreationData} when its own state changes, so the
- * only way to make the coop values stick is to overwrite them after the panel has had its say. This
+ * ({@code visual.showNewGameOptionsPanel}) writes seed, sector size, star age and campaign mode
+ * straight onto {@link CharacterCreationData}. The widget has no per-field API to disable editing.
+ * To keep the co-op values in effect this
  * plugin therefore pins in {@code init} (right after the panel opens), on every {@code advance}
  * frame while the panel is up, and once more in {@code optionSelected} for Continue before the
  * {@code BeginNewGameCreation} rule fires. Procgen reads the data object, so the last write wins.
@@ -188,8 +187,7 @@ public class CoopNewGameDialogPlugin extends NewGameDialogPluginImpl {
             // Seed derivation is CoopSectorProcGen's, reused rather than repeated, so the dialog and
             // procgen can never disagree about what -Dcoop.newGameSeed means.
             CoopSectorProcGen.applyCoopSeedIfPresent(data, announce);
-            data.setSectorSize(choices.sectorSize());
-            data.setSectorAge(choices.sectorAge());
+            choices.applyTo(data);
             // The sector about to be generated will not remember either of these, and no getter
             // brings them back: this is the one moment they are known. CoopModPlugin moves them onto
             // the sector once procgen has made one.

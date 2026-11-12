@@ -10,7 +10,7 @@
       "key": "built",
       "icon": "✓",
       "label": "Built",
-      "note": "0.1.5 remains stable; the 0.2.0 preview has bounded release-smoke evidence."
+      "note": "The 0.2.1 preview targets Starsector 0.98.5a-RC5, and 0.1.5 remains stable."
     },
     {
       "key": "partial",
@@ -37,8 +37,8 @@
       "note": "P26 awaits visual checks, P22/P25/P27 remain queued, and P33 has native follow-ups."
     }
   ],
-  "hereHead": "You are here: P26 merged into main; visual checks remain.",
-  "here": "<b>P26 is on main.</b> The 0.2.0 preview passed its bounded release smoke, and 0.1.5 remains stable. Next are paired M4 storm and M5 ghost/trail visual checks. Guest-proximity encounter generation remains open.",
+  "hereHead": "You are here: RC5 preview ready; P26 visual checks remain.",
+  "here": "<b>0.2.1 targets Starsector 0.98.5a-RC5.</b> The port ran fresh and migrated campaigns on two clients. The stable release is still 0.1.5. Next are paired M4 storm and M5 ghost and trail visual checks. Guest-proximity encounter generation remains open.",
   "attention": [
     {
       "sev": "scope",
@@ -85,7 +85,7 @@
     {
       "sev": "risk",
       "sevLabel": "maintenance",
-      "head": "Vanilla classpath forks are pinned to 0.98a-RC8",
+      "head": "Vanilla classpath forks are pinned to 0.98.5a-RC5",
       "state": "guarded, re-fork on game update",
       "body": "On an engine update, re-extract every fork and reapply its <code>COOP FORK</code> hunks, then update the pinned version. Pass: version guards, fork-marker checks and native-hook smoke tests succeed on the updated engine. Follow <code>starsector-runtime-limitations.md</code>, Classpath forks; current fork scope is listed in the codebase map."
     }

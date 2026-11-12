@@ -1,6 +1,6 @@
 package com.fs.starfarer.api.impl.campaign.terrain;
 
-// COOP FORK: pinned Starsector 0.98a-RC8 starfarer.api.zip source.
+// COOP FORK: pinned Starsector 0.98.5a-RC5 starfarer.api.zip source.
 // Upstream SHA-256: d657180e358aa7de65868d67ab218eedd94514cdf6c6eda80190277eb50f7e93
 // Preserve native save identity; Guest freezes, Host numbers committed generations.
 

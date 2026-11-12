@@ -147,6 +147,9 @@ class CoopAgentClockAlignTest {
         }
         @Override public long getTimestamp() { return timestamp; }
         @Override public GregorianCalendar getCal() { return calendar; }
+        @Override public void set(int cycle, int month, int day) {
+            throw new UnsupportedOperationException("Clock alignment should use exact timestamps");
+        }
         @Override public int getCycle() { return 0; }
         @Override public int getMonth() { return 0; }
         @Override public int getDay() { return 0; }

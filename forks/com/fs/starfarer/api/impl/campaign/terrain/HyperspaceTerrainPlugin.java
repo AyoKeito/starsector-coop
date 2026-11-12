@@ -1,7 +1,7 @@
 package com.fs.starfarer.api.impl.campaign.terrain;
 
-// COOP FORK: pinned Starsector 0.98a-RC8 starfarer.api.zip source.
-// Upstream SHA-256: 8e99b8580e5c0d8f6059c574255e51fcfaf73ae1a61271f272efeb60b5374912
+// COOP FORK: pinned Starsector 0.98.5a-RC5 starfarer.api.zip source.
+// Upstream SHA-256: 98a665210b00caa1e3237a9c83db5edfe2499d71a53270d8cba9b5d800c066c8
 // Native classes/serialized fields are retained; shared weather crosses only coop.storm.
 
 import java.util.ArrayList;
@@ -1170,7 +1170,7 @@ public class HyperspaceTerrainPlugin extends BaseTiledTerrain { // implements Ne
 		
 		float xEnd = (int)((llx + vw - x + extra) / size) + 1;
 		if (xEnd >= tiles.length) xEnd = tiles.length - 1;
-		float yEnd = (int)((lly + vw - y + extra) / size) + 1;
+		float yEnd = (int)((lly + vh - y + extra) / size) + 1;
 		if (yEnd >= tiles.length) yEnd = tiles[0].length - 1;
 		
 		xStart = (int) Math.floor(xStart / samples) * samples;
@@ -1592,6 +1592,8 @@ public class HyperspaceTerrainPlugin extends BaseTiledTerrain { // implements Ne
 		float strikeDamage = crPerDep * strikeValue / suppliesPerDep;
 		if (strikeDamage < STORM_MIN_STRIKE_DAMAGE) strikeDamage = STORM_MIN_STRIKE_DAMAGE;
 		
+		if (Misc.isExtended()) strikeDamage *= Global.getSettings().getFloat("ext_environmentalDamageMult");
+
 		float resistance = member.getStats().getDynamic().getValue(Stats.CORONA_EFFECT_MULT);
 		strikeDamage *= resistance;
 		

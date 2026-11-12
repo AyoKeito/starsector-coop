@@ -1,5 +1,6 @@
 package coop.newgame;
 
+import com.fs.starfarer.api.characters.CharacterCreationData;
 import com.fs.starfarer.api.impl.campaign.procgen.StarAge;
 import coop.config.CoopOptionsStore;
 import coop.net.CoopConnectionRole;
@@ -8,6 +9,8 @@ import org.json.JSONException;
 import org.json.JSONObject;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Proxy;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
 
@@ -54,6 +57,20 @@ class CoopNewGameChoicesTest {
         assertEquals("small", choices.sectorSize());
         assertEquals(StarAge.YOUNG, choices.sectorAge());
         assertTrue(choices.warnings().isEmpty());
+    }
+
+    @Test
+    void applyingCoopChoicesPinsNormalModeAlongsideSizeAndAge() {
+        Map<String, Object> values = new HashMap<>(Map.of("setExtMode", true));
+        CharacterCreationData data = (CharacterCreationData) Proxy.newProxyInstance(
+                CharacterCreationData.class.getClassLoader(),
+                new Class<?>[]{CharacterCreationData.class},
+                (proxy, method, args) -> values.put(method.getName(), args[0]));
+
+        CoopNewGameChoices.resolve("small", "young", "normal", StarAge.ANY).applyTo(data);
+
+        assertEquals(Map.of("setSectorSize", "small", "setSectorAge", StarAge.YOUNG,
+                "setExtMode", false), values);
     }
 
     @Test
@@ -172,9 +189,8 @@ class CoopNewGameChoicesTest {
     void guestBannerNamesTheInviteAsTheSourceOfTheSeed() {
         String banner = CoopNewGameChoices.bannerText(CoopConnectionRole.GUEST, "10.0.0.5", 7777, "MN-42");
 
-        assertEquals("Joining coop host 10.0.0.5:7777. The seed MN-42 came from the host's invite,"
-                + " and sector size and star age are pinned to match the host, so all three fields"
-                + " below are locked.", banner);
+        assertEquals("Joining coop host 10.0.0.5:7777. The invite sets seed MN-42,"
+                + " sector size and star age. Co-op uses Normal campaign mode.", banner);
         // The old wording claimed the settings themselves arrive from the host, which they do not:
         // this client generates locally and the seed lock verifies afterwards.
         assertFalse(banner.contains("come from the host"), banner);
@@ -184,8 +200,9 @@ class CoopNewGameChoicesTest {
     void hostBannerNamesThePortAndTheSeed() {
         String banner = CoopNewGameChoices.bannerText(CoopConnectionRole.HOST, "", 7777, "coop-seed");
 
-        assertEquals("Hosting a coop game on port 7777. Seed coop-seed;"
-                + " sector size and star age are pinned so the guest can generate the same sector.", banner);
+        assertEquals("Hosting a coop game on port 7777. Seed coop-seed,"
+                + " sector size and star age are pinned so the guest can generate the same sector."
+                + " Co-op uses Normal campaign mode.", banner);
     }
 
     @Test

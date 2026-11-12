@@ -13,6 +13,7 @@ import com.fs.starfarer.api.impl.campaign.abilities.GenerateSlipsurgeAbility.Sli
 import com.fs.starfarer.api.impl.campaign.velfield.SlipstreamTerrainPlugin2;
 import com.fs.starfarer.api.impl.campaign.velfield.SlipstreamTerrainPlugin2.SlipstreamSegment;
 import com.fs.starfarer.api.util.FaderUtil;
+import coop.presence.CoopPresenceRegistry;
 
 import java.util.ArrayList;
 import java.util.ArrayDeque;
@@ -29,10 +30,9 @@ import java.util.Set;
  * Native hooks read this identity registry; the mod's campaign controller supplies canonical steps.
  */
 public final class CoopSlipstreamFadeBridge {
-    public static final String PINNED_VERSION = "0.98a-RC8";
-    private static final String HOOK_VERSION = "0.98a-RC8/canonical-fade-1";
+    private static final String HOOK_VERSION = CoopPresenceRegistry.PINNED_VERSION + "/canonical-fade-1";
     public static final String TRAIL_MARKER = "$coopLeviathanTrail";
-    private static final String TRAIL_HOOK_VERSION = "0.98a-RC8/leviathan-trail-1";
+    private static final String TRAIL_HOOK_VERSION = CoopPresenceRegistry.PINNED_VERSION + "/leviathan-trail-1";
     private static final Map<SlipstreamTerrainPlugin2, Control> CONTROLS = new IdentityHashMap<>();
     private static final Set<SlipstreamTerrainPlugin2> TRAIL_REPLICAS =
             Collections.newSetFromMap(new IdentityHashMap<>());
@@ -333,8 +333,8 @@ public final class CoopSlipstreamFadeBridge {
             throw new IllegalStateException("Canonical slipstream hooks are missing from coop-forks.jar", error);
         }
         String version = Global.getSettings() == null ? null : Global.getSettings().getVersionString();
-        if (version == null || !version.contains(PINNED_VERSION)) {
-            throw new IllegalStateException("Canonical slipstream hooks require Starsector " + PINNED_VERSION
+        if (version == null || !version.contains(CoopPresenceRegistry.PINNED_VERSION)) {
+            throw new IllegalStateException("Canonical slipstream hooks require Starsector " + CoopPresenceRegistry.PINNED_VERSION
                     + "; running version is " + version);
         }
     }

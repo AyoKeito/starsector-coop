@@ -14,6 +14,7 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -59,15 +60,16 @@ class CoopRulesFileTest {
     private static Map<String, List<String>> academyGate() {
         Map<String, List<String>> gate = new LinkedHashMap<>();
         gate.put("goToTheGABarEventOption",
-                List.of("$global.daysSinceStart > 180", "!$player.metBaird", "RollProbability 0.2"));
+                List.of("$global.daysSinceStart > 150", "!$player.metBaird", "RollProbability 0.2"));
         gate.put("goToGA_barEvent",
-                List.of("$option == goToGA_barEvent", "GenGAIntroAcademician"));
+                List.of("$option == goToGA_barEvent"));
         gate.put("gaAddOptionMeetProvost",
                 List.of("$id == station_galatia_academy", "!$player.metBaird"));
         gate.put("gaIntro2surveyOpen",
                 List.of("$option == surveyPerform", "!$global.gaIntro2found", "RollProbability 0.3 score:1000"));
         gate.put("gaDHOhookStart",
-                List.of("!$global.gaDHO_didInvite", "$global.daysSinceStart > 365", "RollProbability 0.3"));
+                List.of("!$global.gaDHO_didInvite", "$market.daysExisted > 120",
+                        "$global.daysSinceStart > 600", "RollProbability 0.3"));
         gate.put("gaDHOhookStartDev",
                 List.of("!$global.gaDHO_didInvite", "$global.isDevMode"));
         gate.put("gaDHOjustFoundArrayStart",
@@ -111,6 +113,27 @@ class CoopRulesFileTest {
     @Test
     void everyAcademyRootEntryIsGatedOnTheGuestFlag() throws IOException {
         assertGated(ACADEMY_GATE);
+    }
+
+    @Test
+    void academyBarConversationKeepsTheRc5StoryFlag() throws IOException {
+        List<String> barConversation = rows().stream()
+                .filter(row -> "goToGA_barEvent".equals(row.get(0)))
+                .findFirst().orElseThrow();
+
+        assertFalse(barConversation.get(2).contains("GenGAIntroAcademician"));
+        assertEquals(List.of("BeginConversation ga_recruiter", "$player.metIscare = true"),
+                barConversation.get(3).lines().toList());
+    }
+
+    @Test
+    void testStartUsesTheSameDifficultyRoutingAsRc5Careers() throws IOException {
+        List<String> zigguratStart = rows().stream()
+                .filter(row -> "coopZigguratPicked".equals(row.get(0)))
+                .findFirst().orElseThrow();
+
+        assertTrue(zigguratStart.get(2).lines().anyMatch("!$extendedMode"::equals));
+        assertTrue(zigguratStart.get(3).lines().anyMatch("FireBest NGCSelectDifficulty"::equals));
     }
 
     /**

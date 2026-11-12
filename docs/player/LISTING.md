@@ -1,19 +1,18 @@
-# Starsector Coop V1 (0.2.0 preview)
+# Starsector Coop V1 (0.2.1 preview)
 
-Two people, two copies of Starsector 0.98a-RC8, one campaign. The sector is generated once from a
+Two people, two copies of Starsector 0.98.5a-RC5, one campaign. The sector is generated once from a
 shared seed and both of you fly around in it at the same time, on one calendar. The host's game is
 the authority: it runs the NPC fleets, the markets, the economy and the colonies, and the guest's
 game mirrors them. One of you pilots each battle; the other can send their fleet in as an AI ally.
 Author: AyoKeito.
 
-This prerelease is a manual download. Both players must install the same complete release archive;
-the launcher's update check looks for stable releases and will not offer this preview. Keep copies
-of both saves before trying it. Save compatibility with older releases is not promised.
+Both players need the same `coop-0.2.1.zip` from the [preview release](https://github.com/AyoKeito/starsector-coop/releases/tag/v0.2.1).
+Keep copies of both saves before updating.
 
 ## Requirements
 
-- Starsector `0.98a-RC8` on both PCs. The mod checks the game version before connecting. Same mod list, same
-  versions, same download of this mod, on both. Ironman off on both.
+- Starsector `0.98.5a-RC5` on both PCs, in Normal campaign mode with Ironman off. Both players need
+  the same co-op build and the same versions of every other enabled mod.
 - The host's machine reachable from the guest, by one of: a VPN pseudo-LAN, IPv6, a port forward you
   add yourself, or UPnP/NAT-PMP. `docs/player/CONNECT.md` walks through all four and explains what
   the connection doctor writes to the log. Only the host needs this; nothing dials the guest.
@@ -118,9 +117,9 @@ The full list is in `docs/player/LIMITATIONS.md`. The ones worth knowing before 
   systems and hyperspace lights are supported; older uncaptured systems and other encounter
   creators are not. A guest exploring alone does not trigger new Host encounters. Sensor ghosts
   are local and the guest's cosmetic subset does not mirror the host's ghosts.
-- **Story missions are the host's.** The Galatia Academy chain runs on the host's engine and its
-  rewards go to the host. The story state is not shared, so the mod removes every way into the chain
-  on the guest.
+- **The Galatia Academy chain is the host's.** The host receives its rewards and the guest's entry
+  points are removed. The Sindrian Diktat storyline and support fleet interactions remain unverified
+  in co-op.
 - **Contacts, their missions, person bounties and system bounties are local to each player,** and
   the guest gets no person bounties at all.
 - **No trade screen between the two of you.** Cargo goes by jettisoned pod, ships through the shared

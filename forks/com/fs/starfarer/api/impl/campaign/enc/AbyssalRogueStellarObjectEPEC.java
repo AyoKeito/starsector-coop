@@ -2,7 +2,7 @@
  * ==========================================================================================
  * COOP FORK - DO NOT EDIT GAMEPLAY LOGIC. Primitive capture and parent-EPEC replay hooks only.
  * ------------------------------------------------------------------------------------------
- * Starsector version : 0.98a-RC8
+ * Starsector version : 0.98.5a-RC5
  * Original source     : starfarer.api.zip!/com/fs/starfarer/api/impl/campaign/enc/AbyssalRogueStellarObjectEPEC.java
  * Compiled into       : mods/coop/jars/coop-forks.jar (classpath-prepended ahead of starfarer.api.jar).
  * Capture/replay:

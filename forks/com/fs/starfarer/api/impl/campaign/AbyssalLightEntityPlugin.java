@@ -91,7 +91,7 @@ public class AbyssalLightEntityPlugin extends BaseCustomEntityPlugin {
 				done = true;
 				return;
 			}
-			// COOP FORK (0.98a-RC8): player mirrors are never native NPC casualties.
+			// COOP FORK (0.98.5a-RC5): player mirrors are never native NPC casualties.
 			if (!coopAllowDwellerEncounter(light, fleet)) {
 				done = true;
 				return;
@@ -153,6 +153,7 @@ public class AbyssalLightEntityPlugin extends BaseCustomEntityPlugin {
 		public float detectedRange;
 		public float bonusMult;
 		public float durationDays;
+		public Boolean permanent = null;
 		public int pointsOverride = 0;
 
 		public AbyssalLightParams() {
@@ -333,9 +334,9 @@ public class AbyssalLightEntityPlugin extends BaseCustomEntityPlugin {
 
 		//boolean dweller = isDespawning();
 
-		float days = Misc.getDays(amount);
 		// COOP FORK: Guest lifetime and depth cleanup are supplied by the complete Host set.
-		if (!coopHoldsGuestLifetime(entity)) {
+		if (params.permanent == null && !coopHoldsGuestLifetime(entity)) {
+			float days = Misc.getDays(amount);
 			params.durationDays -= days;
 			if (params.durationDays <= 0f || Misc.getAbyssalDepth(entity) < 1f) {
 				despawn(DespawnType.FADE_OUT);

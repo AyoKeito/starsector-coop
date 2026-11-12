@@ -1,10 +1,25 @@
 # Changelog
 
+## 0.2.1 preview
+
+This preview targets **Starsector 0.98.5a-RC5**. Back up both co-op saves and install
+`coop-0.2.1.zip` on both PCs. If the game update reset `vmparams`, open **Installation Details**
+in the co-op launcher and click **Fix** beside the classpath check.
+
+- Updated nine engine forks, the fast-forward and guest-system hooks, the seasonal slipstream
+  tools, and the Galatia Academy rules for RC5.
+- Shared lights preserve the Juvenile Dweller's lifetime and battle type.
+- Co-op campaigns use Normal mode. Loading a Survival save blocks the co-op connection.
+
+Fresh two-player campaigns and a copied RC8 campaign pair passed the RC5 smoke test, including
+fast-forward and coordinated saves. The new Sindrian storyline and support fleet interactions
+still need co-op testing.
+
 ## 0.2.0 preview
 
 Shares more of the hyperspace world. Install the same packaged preview ZIP on both PCs and back
-up both saves first. This preview is downloaded manually; the launcher and Version Checker keep
-following the stable release feed.
+up both saves first. Download this preview manually. The launcher continues to follow the stable
+release feed.
 
 - Host seasonal slipstreams and slipsurges are shared, with local discovery preserved. Native
   Leviathan and Calf trails share shape and fade checkpoints as they grow.

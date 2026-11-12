@@ -13,8 +13,8 @@ solo play and the preview features that still need in-game checking.
   the full range of native storm effects still need in-game checking.
 - **Sensor ghosts stay local.** The guest runs a restricted cosmetic subset; the host's ghosts are
   not mirrored. Star-corona and pulsar flares also remain local.
-- **Story missions are the host's.** The mod removes every way into the Galatia Academy chain on
-  the guest. Contacts, person bounties and system bounties are local to each player.
+- **The Galatia Academy chain is the host's.** The mod removes the guest's entry points.
+  Contacts, person bounties and system bounties are local to each player.
 - **No trade screen between the two of you.** Cargo goes by jettisoned pod, ships through shared
   storage, credits through a row on the Coop Options page.
 - **The host's save is the campaign.** The guest's save is co-op material and needs the mod and a
@@ -132,14 +132,17 @@ ones held back so it does not spawn a second copy of the host's world. System bo
 each game separately, so the guest sees bounties the host does not and is paid by its own game for
 kills in them.
 
-**Story missions are the host's.** The Galatia Academy chain and the missions it unlocks run on one
+**The Galatia Academy chain is the host's.** The chain and the missions it unlocks run on one
 engine only, the host's, and their rewards go to the host. The mod enforces this on the guest: the
 bar offer that introduces the Academy, the provost meeting at the station, the data core a survey
-turns up, the relay message after the first year and the Hamatsu recovery are all removed on the
-guest's game, because the story flags and the places those missions create live in each game's own
+turns up, the relay message that can appear after day 600 and the Hamatsu recovery are all removed
+on the guest's game, because the story flags and the places those missions create live in each game's own
 memory and are not copied across. The guest can still dock at the Academy and ask about it. One-of-a-kind
 finds in the shared world are a different matter: a derelict, a ruin, a cryosleeper or a one-time bar offer goes to whoever gets there first,
 and the other player sees it taken.
+
+The Sindrian Diktat storyline and support fleet interactions added in 0.98.5a have no dedicated
+co-op synchronization. Their behavior across players remains unverified.
 
 ## Trading with each other
 

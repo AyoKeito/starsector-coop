@@ -1,7 +1,7 @@
 # Starsector 2-Player Coop Multiplayer Mod: Design & Findings
 
 **Document status:** describes the 0.1.5 release code (2026-10-12, mod version as declared in `mod_info.json`). This file is canonical for *design rationale*: why the shipped architecture is shaped the way it is, and which alternatives were rejected. It is not the build tracker. The **Phase Status Ledger** at the top of `COOP_MP_IMPLEMENTATION_PLAN_V1.md` is canonical for what is BUILT, specced or cancelled.
-**Target:** Starsector 0.98a-RC8. `CoopPresenceRegistry.PINNED_VERSION` holds that string; the handshake refuses any other version unless `-Dcoop.allowGameVersionMismatch=true` is set.
+The target is Starsector 0.98.5a-RC5. `CoopPresenceRegistry.PINNED_VERSION` holds that string. The handshake refuses other versions unless `-Dcoop.allowGameVersionMismatch=true` is set.
 **Audience:** the author across machines, future Claude sessions, anyone joining the project.
 
 Player-facing behaviour lives in `docs/player/LIMITATIONS.md`, `docs/player/CONNECT.md` and `docs/player/INSTALL.md`. Engine and sandbox facts live in `docs/starsector-runtime-limitations.md`. This document does not repeat them.
@@ -619,7 +619,7 @@ To read the API source on a new machine, extract `starfarer.api.zip` anywhere re
 
 ### 14.4 Bringing this project to a new machine
 
-1. Install Starsector 0.98a-RC8.
+1. Install Starsector 0.98.5a-RC5.
 2. Clone the repo into `<install>\mods\coop`.
 3. Build with `.\gradlew.bat clean test build`.
 4. Prepend `..\mods\coop\jars\coop-forks.jar;` to the `-classpath` in `vmparams`, or let the launcher's Fix button do it.

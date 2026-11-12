@@ -56,16 +56,31 @@ public final class CoopLightCodec {
         w.add(record.frequencyChangeMult()); w.add(record.size()); w.add(record.detectedRange());
         w.add(record.bonusMult()); w.add(record.remainingDays()); w.add(record.pointsOverride());
         w.add(record.dweller()); w.add(record.salvageSeed());
+        // Saved outcomes from RC8 end after salvageSeed.
+        if (record.permanent() || record.juvenileDweller()) {
+            w.add(record.permanent());
+            w.add(record.juvenileDweller());
+        }
         return w.finish();
     }
 
     public static CoopLightRecord decode(String encoded) {
         Reader r = new Reader(encoded, "LIGHT");
-        CoopLightRecord result = new CoopLightRecord(CoopLightRecord.VERSION, r.next(), r.next(),
-                r.number(), r.number(), r.integer(), r.number(), r.number(), r.number(),
-                r.number(), r.number(), r.number(), r.number(), r.integer(), r.bool(), r.longInteger());
+        String id = r.next(), hostEntityId = r.next();
+        float x = r.number(), y = r.number();
+        int colorArgb = r.integer();
+        float frequencyMultMin = r.number(), frequencyMultMax = r.number(), frequencyChangeMult = r.number();
+        float size = r.number(), detectedRange = r.number(), bonusMult = r.number(), remainingDays = r.number();
+        int pointsOverride = r.integer();
+        boolean dweller = r.bool();
+        long salvageSeed = r.longInteger();
+        boolean hasTraits = r.hasRemaining();
+        boolean permanent = hasTraits && r.bool();
+        boolean juvenileDweller = hasTraits && r.bool();
         r.end();
-        return result;
+        return new CoopLightRecord(CoopLightRecord.VERSION, id, hostEntityId, x, y, colorArgb,
+                frequencyMultMin, frequencyMultMax, frequencyChangeMult, size, detectedRange,
+                bonusMult, remainingDays, pointsOverride, dweller, salvageSeed, permanent, juvenileDweller);
     }
 
     public static String encodeSet(Collection<CoopLightRecord> records) {
@@ -202,6 +217,7 @@ public final class CoopLightCodec {
                 default -> throw new IllegalArgumentException("Invalid light boolean");
             };
         }
-        void end() { if (cursor != text.length()) throw new IllegalArgumentException("Trailing light payload"); }
+        boolean hasRemaining() { return cursor != text.length(); }
+        void end() { if (hasRemaining()) throw new IllegalArgumentException("Trailing light payload"); }
     }
 }

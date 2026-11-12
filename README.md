@@ -12,8 +12,8 @@ Your ships, cargo, credits, officers, and skills stay yours.
 </p>
 
 > [!IMPORTANT]
-> **Version 0.2.0 is a preview release.** Download its packaged ZIP manually from Releases; the
-> launcher's updater follows stable releases. Back up both players' saves before upgrading.
+> **The 0.2.1 preview targets Starsector 0.98.5a-RC5.** Both players should back up their saves
+> and install the same ZIP from the [preview release](https://github.com/AyoKeito/starsector-coop/releases/tag/v0.2.1).
 > One player pilots each battle on their own PC; the other
 > player waits on a paused campaign, and can send their fleet in as an AI ally. Two players piloting
 > in the same battle is not supported in this release.
@@ -34,7 +34,7 @@ local trade effects, missions, and differences between the two screens.
 
 ## Requirements
 
-- **Starsector `0.98a-RC8` on both PCs**, with Ironman off.
+- **Starsector `0.98.5a-RC5` on both PCs**, with Ironman off. Co-op uses Normal campaign mode.
 - **The same co-op build and other mods on both PCs**, including matching mod versions.
 - **Windows for the launcher.** It uses the Java runtime bundled with Starsector.
 - **A connection to the host's PC.** Use a LAN, VPN, IPv6, port forwarding, or a router with

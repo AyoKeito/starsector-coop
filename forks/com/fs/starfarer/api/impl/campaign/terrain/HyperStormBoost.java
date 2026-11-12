@@ -10,7 +10,7 @@ import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.fleet.FleetMemberViewAPI;
 import com.fs.starfarer.api.impl.campaign.terrain.HyperspaceTerrainPlugin.CellStateTracker;
 import com.fs.starfarer.api.util.Misc;
-// COOP FORK: pinned 0.98a-RC8; opt-in velocity-write observations only, no saved fields.
+// COOP FORK: pinned 0.98.5a-RC5; opt-in velocity-write observations only, no saved fields.
 import coop.storm.CoopStormExecutionProbe;
 
 public class HyperStormBoost implements EveryFrameScript {

@@ -1,13 +1,13 @@
 # Starsector co-op mod
 
-Java mod for Starsector 0.98a-RC8 that runs one shared campaign across two clients: the host owns the simulation, the guest mirrors it. `README_DEV.md` has the full commands; this file is the part a session gets wrong without being told.
+Java mod for Starsector 0.98.5a-RC5 that runs one shared campaign across two clients. The host owns the simulation and the guest mirrors it. `README_DEV.md` has the full commands.
 
 ## Repo and layout
 
 - This directory is the git repo (`origin` = github.com/AyoKeito/starsector-coop, public, `main`). Run git from here; `K:\Starsector` is not a repo.
 - Never commit `tmp_ff_analysis` (decompiled game sources, scratch runbooks), `jars/` or `build/`.
 - `src/main/java/coop` is the mod, `src/launcher` is the desktop launcher (must stay free of Starsector API types), `forks/` holds classpath-shadow copies of vanilla classes built into `coop-forks.jar`, `tools/starsector-mcp` is the MCP server that drives the in-game agent bridge.
-- Worktree builds need `-PstarsectorCore=K:\Starsector\starsector-core`.
+- Build against `-PstarsectorCore=C:\Program Files (x86)\Starsector\starsector-core`. The game at `K:\Starsector` is the old RC8 install.
 
 ## Docs: what is canonical where
 
@@ -21,10 +21,10 @@ Java mod for Starsector 0.98a-RC8 that runs one shared campaign across two clien
 
 ## Build, test, deploy
 
-- `.\gradlew.bat clean test build` from this directory (or `scripts\build.ps1`). Tests must stay green; the suite is the only safety net between a change and a two-instance smoke.
-- Deploy with `scripts\deploy-to-test-clients.ps1` (copies the whole mod, `data/` included, into `K:\Starsector-coop-test\host` and `\guest`). Never hand-copy jars. Relaunch both games after deploying.
-- Launch: `scripts\launch-host.ps1 -Port 7777` and `scripts\launch-guest.ps1 -HostAddress 127.0.0.1 -Port 7777`; add `-Diagnostics -Bridge` for a smoke session. Logs: `K:\Starsector-coop-test\<role>\starsector-core\starsector.log`.
-- Commit per phase or per fix pass, push when the user says so. Releases are never marked prerelease (the launcher reads `releases/latest`).
+- Run `scripts\build.ps1 -BaseInstallRoot 'C:\Program Files (x86)\Starsector'` to compile and test against RC5.
+- Deploy with `scripts\deploy-to-test-clients.ps1 -SkipBuild -TestRoot <RC5 test root>`. Relaunch both test games after deploying.
+- Pass the same `-TestRoot` to both launch scripts. Add `-Diagnostics -Bridge` for a smoke session and read `<RC5 test root>\<role>\starsector-core\starsector.log`.
+- Commit per phase or per fix pass and push when the user says so. Publish requested previews as GitHub prereleases. The launcher reads `releases/latest` for stable updates, and Version Checker reads `main/coop.version` directly.
 
 ## Engine rules that compile fine and crash in-game
 

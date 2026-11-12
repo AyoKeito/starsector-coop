@@ -38,7 +38,7 @@ class CoopSlipstreamWorldTest {
     void pinnedNativeHooks() {
         previousSettings = Global.getSettings();
         Global.setSettings(proxy(SettingsAPI.class, (self, method, args) -> switch (method.getName()) {
-            case "getVersionString" -> "Starsector 0.98a-RC8";
+            case "getVersionString" -> "Starsector 0.98.5a-RC5";
             default -> coop.testing.ProxyDefaults.defaultValue(method.getReturnType());
         }));
     }
@@ -354,6 +354,7 @@ class CoopSlipstreamWorldTest {
         assertEquals(List.of("new-native"), result.newIds());
         assertEquals("created", result.reason());
         assertEquals(3, manager.lastMonth);
+        assertEquals(207, manager.lastCycle);
         assertThrows(UnsupportedOperationException.class, () -> result.newIds().clear());
     }
 
@@ -400,6 +401,8 @@ class CoopSlipstreamWorldTest {
         assertTrue(a.wasUsed);
         assertTrue(z.wasUsed);
         assertEquals(1, manager.addCalls);
+        assertEquals(3, manager.lastMonth);
+        assertEquals(207, manager.lastCycle);
     }
 
     @Test
@@ -693,6 +696,7 @@ class CoopSlipstreamWorldTest {
             CampaignClockAPI clock = proxy(CampaignClockAPI.class, (self, method, args) -> switch (method.getName()) {
                 case "getTimestamp" -> timestamp.get();
                 case "getMonth" -> 3;
+                case "getCycle" -> 207;
                 case "convertToDays" -> (float) args[0] / 10f;
                 case "convertToSeconds" -> (float) args[0] * 10f;
                 default -> throw unexpected("clock", method.getName());
@@ -822,11 +826,13 @@ class CoopSlipstreamWorldTest {
     private static final class TestManager extends SlipstreamManager {
         int addCalls;
         int lastMonth;
+        int lastCycle;
         Runnable onAdd;
 
-        @Override public void addStream(int month) {
+        @Override public void addStream(int month, int cycle) {
             addCalls++;
             lastMonth = month;
+            lastCycle = cycle;
             if (onAdd != null) onAdd.run();
         }
 

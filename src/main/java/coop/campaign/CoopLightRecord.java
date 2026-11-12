@@ -7,7 +7,7 @@ public record CoopLightRecord(int version, String id, String hostEntityId, float
                               int colorArgb, float frequencyMultMin, float frequencyMultMax,
                               float frequencyChangeMult, float size, float detectedRange,
                               float bonusMult, float remainingDays, int pointsOverride,
-                              boolean dweller, long salvageSeed) {
+                              boolean dweller, long salvageSeed, boolean permanent, boolean juvenileDweller) {
     public static final int VERSION = 1;
     public static final int MAX_LIGHTS = 512;
 
@@ -26,6 +26,18 @@ public record CoopLightRecord(int version, String id, String hostEntityId, float
         bounded(remainingDays, 0f, 1_000_000f, "remaining days");
         if (pointsOverride < -1 || pointsOverride > 1_000_000)
             throw new IllegalArgumentException("Invalid light points override");
+        if (juvenileDweller && !dweller)
+            throw new IllegalArgumentException("Juvenile light must be a Dweller light");
+    }
+
+    public CoopLightRecord(int version, String id, String hostEntityId, float x, float y,
+                           int colorArgb, float frequencyMultMin, float frequencyMultMax,
+                           float frequencyChangeMult, float size, float detectedRange,
+                           float bonusMult, float remainingDays, int pointsOverride,
+                           boolean dweller, long salvageSeed) {
+        this(version, id, hostEntityId, x, y, colorArgb, frequencyMultMin, frequencyMultMax,
+                frequencyChangeMult, size, detectedRange, bonusMult, remainingDays, pointsOverride,
+                dweller, salvageSeed, false, false);
     }
 
     public String encode() { return CoopLightCodec.encode(this); }
@@ -35,7 +47,7 @@ public record CoopLightRecord(int version, String id, String hostEntityId, float
     public String staticFingerprint() {
         return new CoopLightRecord(version, id, hostEntityId, x, y, colorArgb,
                 frequencyMultMin, frequencyMultMax, frequencyChangeMult, size, detectedRange,
-                bonusMult, 0f, pointsOverride, dweller, salvageSeed).encode();
+                bonusMult, 0f, pointsOverride, dweller, salvageSeed, permanent, juvenileDweller).encode();
     }
 
     public static String canonicalId(String id) {

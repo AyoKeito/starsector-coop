@@ -1,6 +1,6 @@
 # Starsector Runtime Limitations
 
-What Starsector `0.98a-RC8` does and does not let a mod script do, and what the coop mod accepts as a result. Every entry states the engine mechanism and the consequence a player or tester sees. Findings that later got fixed are removed from here as the fix lands; the ledger in `COOP_MP_IMPLEMENTATION_PLAN_V1.md` keeps that history.
+The co-op mod targets Starsector `0.98.5a-RC5`. The notes below describe the engine behavior it relies on and record earlier versions where the original check used one. The ledger in `COOP_MP_IMPLEMENTATION_PLAN_V1.md` keeps the history.
 
 ## Script sandbox
 
@@ -118,7 +118,7 @@ Starsector caps per-frame `dt`. A minimized or background window gets fewer fram
 
 ### Fast-forward
 
-Vanilla has two fast-forward input modes. Which one is active is a static boolean on `com.fs.starfarer.settings.StarfarerSettings` (settings-menu checkbox `Campaign "speed up time" is a toggle`), stored in a private static field literally named `class`, getter `Oo0000()Z`. The field is resolved with `findStaticGetter`/`findStaticSetter` on a `privateLookupIn` of that class, never by setter name: the setter is `ö00000(Z)V` (U+00F6) and four other static `(boolean)` setters on the class print identically under `javap`. Dumps are in `K:\Starsector\tmp_ff_analysis\`.
+Vanilla has two fast-forward input modes. The settings checkbox `Campaign "speed up time" is a toggle` controls a static boolean on `com.fs.starfarer.settings.StarfarerSettings`. On 0.98.5a-RC5, `CampaignState.processInput` calls `Oo0000()Z` to read the flag. The `if(Z)V` overload writes that same field. `CoopFastForwardLock` binds both methods by their exact signatures because RC5 renamed the former `class` field.
 
 **Hold mode** (vanilla default) cannot be mirrored or blocked from a mod. The loop lives in obfuscated `CampaignState.advance(float, ...)`, polls the Shift key directly and calls `CampaignEngine.advance()` twice per frame. Consuming the `FAST_FORWARD` input event does not stop it. `SectorAPI.isInFastAdvance()` and `isFastForwardIteration()` both read `false` from an `EveryFrameScript` while it runs, `setFastForwardIteration` is overwritten every frame, and `setInFastAdvance(true)` sticks but does not change the clock rate (it drives a separate extra `CampaignClock.advance()`, the ">>" path). The only public read is `CampaignUIAPI.isFastForward()`.
 
@@ -203,7 +203,7 @@ M5 adds `Kind.TRAIL` to the existing v2 records for exact tagged native Leviatha
 
 Cross-client location identity uses `CoopLocations.keyOf`: a star system's optional unique id when present, otherwise its engine id. This distinguishes Nameless Rock (`nameless_rock_location`) and temporary abyssal systems from Gate Hauler even though each has the raw engine id `deep space`. Hyperspace retains its engine id. M2 must set the replica's optional unique id to the host instance id and invalidate the location cache on create/remove.
 
-Native `SlipstreamManager.addStream(month)` can create nothing because every configured route has `wasUsed=true`; removing terrain does not clear that flag. The host-only QA action now reports actual creation and configuration diagnostics. Explicit `rearmUsedRoute:true`, only after all seasonal terrain is gone and all configured routes are used, temporarily rearms one route through the native builder and restores its flag in `finally`. No normal spawning or replication path uses this option.
+On 0.98.5a-RC5, native seasonal slipstreams turn over once per cycle by default. `SlipstreamManager.addStream(month, cycle)` uses both values to pick stream direction. A call creates no terrain when every configured route has `wasUsed=true`. Removing terrain leaves that flag set. The host-only `streamadd` action passes the current campaign month and cycle and reports whether the call created terrain. With `rearmUsedRoute:true`, the action temporarily rearms one route after all seasonal terrain is gone and all configured routes are used, then restores the flag in `finally`.
 
 Future fade anchors defer until Guest's calendar reaches their committed tick, including paused checkpoints. Version 2 intentionally holds Host's paused native phase when Guest's calendar is ahead. Active comparisons use the current Host origin/tick, native fade/sweep phase and Host mode, with a reachable Guest clock. A reachable Guest must converge at a frozen Host within five wall-clock seconds; the intensity limit is 0.05. A settled phase mismatch is a failure. Mature completion checks geometry and final settled state instead of a continuously refreshed grid tick: no fade noise, every fader fully in (`IDLE` or native terminal `IN` with no bounce), and the native sweep finished. Unfinished fades or cursors cannot use that exception. Raw calendars and normal clock-coupling offsets remain separate observations; natural controls use no calendar writes after their trigger.
 

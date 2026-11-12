@@ -51,7 +51,7 @@ class CoopWreckBridgeTest {
         guard.set(null, null);
         CoopPresenceRegistry.clear();
         CoopWreckBridge.clear();
-        version("Starsector 0.98a-RC8");
+        version("Starsector 0.98.5a-RC5");
         CampaignClockAPI clock = (CampaignClockAPI) Proxy.newProxyInstance(getClass().getClassLoader(),
                 new Class<?>[]{CampaignClockAPI.class}, (p, m, a) -> m.getName().equals("convertToDays")
                         ? a[0] : ProxyDefaults.defaultValue(m.getReturnType()));

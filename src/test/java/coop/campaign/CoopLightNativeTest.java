@@ -22,7 +22,9 @@ import com.fs.starfarer.api.impl.campaign.enc.EncounterManager;
 import com.fs.starfarer.api.impl.campaign.enc.EncounterPoint;
 import com.fs.starfarer.api.impl.campaign.ids.Tags;
 import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
+import com.fs.starfarer.api.impl.campaign.procgen.StarSystemGenerator;
 import com.fs.starfarer.api.impl.campaign.terrain.HyperspaceAbyssPluginImpl.AbyssalEPData;
+import com.fs.starfarer.api.impl.campaign.world.JuvenileDweller;
 import coop.ambient.CoopLightBridge;
 import coop.presence.CoopPresenceRegistry;
 import coop.testing.ApiProxies;
@@ -95,6 +97,34 @@ class CoopLightNativeTest {
         Scene guest = new Scene(); Global.setSector(guest.sector); guest.world.upsert(recipe);
         assertEquals(recipe, guest.world.readOnlySnapshot().get(0));
         assertTrue(guest.lights.get(0).tags.contains(Tags.DWELLER_LIGHT));
+    }
+
+    @Test void nativeJuvenileDwellerKeepsItsPermanentLifetimeAndBattleRuleOnGuest() throws Exception {
+        Scene host = new Scene();
+        Global.setSector(host.sector);
+        Random oldRandom = StarSystemGenerator.random;
+        try {
+            StarSystemGenerator.random = new Random(17);
+            JuvenileDweller.spawnIfNeeded();
+        } finally {
+            StarSystemGenerator.random = oldRandom;
+        }
+        CoopLightRecord recipe = host.world.captureHost().get(0);
+        assertTrue(recipe.permanent());
+        assertTrue(recipe.juvenileDweller());
+
+        Scene guest = new Scene();
+        Global.setSector(guest.sector);
+        guest.world.upsert(CoopLightRecord.decode(recipe.encode()));
+        Light light = guest.lights.get(0);
+        assertEquals(Boolean.TRUE, light.params.permanent);
+        assertEquals(Boolean.TRUE, light.saved.get("$juvenileDweller"));
+        assertEquals(recipe, guest.world.readOnlySnapshot().get(0));
+
+        light.params.durationDays = 0f;
+        field(AbyssalLightEntityPlugin.class, "untilFrequencyChange").set(light.plugin, 1000f);
+        light.plugin.advance(1f);
+        assertFalse(light.plugin.isDespawning());
     }
 
     @Test void guestAdvanceKeepsLifetimeButStillAdvancesNativeVisualPhase() throws Exception {

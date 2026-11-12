@@ -62,7 +62,7 @@ public class GBIGenerateSlipstream extends BaseGhostBehaviorInterrupt implements
 
 	
 	// COOP FORK: methods add no instance fields or saved references to this native script.
-	public static String coopTrailHookVersion() { return "0.98a-RC8/leviathan-trail-1"; }
+	public static String coopTrailHookVersion() { return "0.98.5a-RC5/leviathan-trail-1"; }
 
 	public void coopMarkTrail() {
 		if (getClass() == GBIGenerateSlipstream.class) {

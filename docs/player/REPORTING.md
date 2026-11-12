@@ -59,6 +59,9 @@ What comes after `reason` depends on the code: seeds, fingerprints and campaign 
 not the version the mod was built for, so no port was opened and no connection was attempted. Both
 players get it independently, and each log names that machine's own pair.
 
+Loading a Survival save also blocks co-op startup. Search the log for `This save uses Survival mode`
+if the campaign loads and the co-op lobby stays closed.
+
 ## Marking the moment while you play
 
 Press **F11** when you see something wrong. One line goes into your log and the same line into your

@@ -124,7 +124,7 @@ class CoopLeviathanTrailBridgeTest {
     }
 
     @Test void nativeGeneratorKeepsItsOriginalSaveFields() {
-        assertEquals("0.98a-RC8/leviathan-trail-1", GBIGenerateSlipstream.coopTrailHookVersion());
+        assertEquals("0.98.5a-RC5/leviathan-trail-1", GBIGenerateSlipstream.coopTrailHookVersion());
         Set<String> fields = new HashSet<>();
         for (Field field : GBIGenerateSlipstream.class.getDeclaredFields()) {
             if (!Modifier.isStatic(field.getModifiers())) fields.add(field.getName());

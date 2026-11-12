@@ -140,7 +140,7 @@ public class NearbyEventsEvent extends BaseEventPlugin implements RouteFleetSpaw
 	}
 	
 	protected void maybeSpawnDerelictShip() {
-		// COOP FORK (0.98a-RC8): only the host rolls floating wrecks. Distress-call logic is unchanged.
+		// COOP FORK (0.98.5a-RC5): only the host rolls floating wrecks. Distress-call logic is unchanged.
 		if (coop.ambient.CoopWreckBridge.isGuestMode()) return;
 		CampaignFleetAPI playerFleet = Global.getSector().getPlayerFleet();
 		coopTrySpawnDerelictNear(playerFleet);
@@ -503,7 +503,7 @@ public class NearbyEventsEvent extends BaseEventPlugin implements RouteFleetSpaw
 		NESpawnData data = (NESpawnData) route.getCustom();
 		
 		if (data.type == DistressEventType.PIRATE_AMBUSH_TRAP) {
-			float tf = PirateBaseManager.getInstance().getStandardTimeFactor();
+			float tf = PirateBaseManager.getStandardTimeFactor();
 			int points = (int) (10 + new Random().nextInt(20) * tf);
 			
 			CampaignFleetAPI fleet = PirateFleetManager.createPirateFleet(points, null, data.location.getLocation());
@@ -517,7 +517,7 @@ public class NearbyEventsEvent extends BaseEventPlugin implements RouteFleetSpaw
 			}
 			return fleet;
 		} else if (data.type == DistressEventType.PIRATE_AMBUSH) {
-			float tf = PirateBaseManager.getInstance().getStandardTimeFactor();
+			float tf = PirateBaseManager.getStandardTimeFactor();
 			int points = (int) (10 + new Random().nextInt(20) * tf);
 			
 			CampaignFleetAPI fleet = PirateFleetManager.createPirateFleet(points, null, data.location.getLocation());

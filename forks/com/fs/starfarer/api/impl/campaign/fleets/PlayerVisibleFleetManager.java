@@ -2,9 +2,9 @@
  * ==========================================================================================
  * COOP FORK - DO NOT EDIT GAMEPLAY LOGIC. Targeted guest-presence fork only.
  * ------------------------------------------------------------------------------------------
- * Starsector version : 0.98a-RC8
+ * Starsector version : 0.98.5a-RC5
  * Original source     : starfarer.api.zip!/com/fs/starfarer/api/impl/campaign/fleets/PlayerVisibleFleetManager.java
- *                       (byte-identical copy of the 0.98a-RC8 source; verified before editing)
+ *                       (byte-identical copy of the 0.98.5a-RC5 source; verified before editing)
  * Compiled into       : mods/coop/jars/coop-forks.jar (prepended to vmparams -classpath
  *                       ahead of starfarer.api.jar so the JVM resolves this copy first).
  *
@@ -26,7 +26,7 @@
  *   - new static : coopPresence()                  - inherited by every subclass fork
  *   - new method : isVisibleToCoopPresence(...)    - vanilla's own test, presence as the observer
  *
- * Version drift guard: this fork mirrors 0.98a-RC8 line for line. On first use of the presence term
+ * Version drift guard: this fork mirrors 0.98.5a-RC5 line for line. On first use of the presence term
  * the running game version is checked against CoopPresenceRegistry.PINNED_VERSION; on a mismatch one
  * loud warning is logged and the presence term is disabled for the process, leaving stock behaviour.
  *

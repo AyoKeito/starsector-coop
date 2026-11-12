@@ -37,7 +37,7 @@ public final class CoopPresenceRegistry {
      * every fork falls back to the vanilla logic it was copied from rather than running a stale copy of
      * that logic with co-op behaviour bolted on.
      */
-    public static final String PINNED_VERSION = "0.98a-RC8";
+    public static final String PINNED_VERSION = "0.98.5a-RC5";
 
     private static volatile SectorEntityToken presence;
 

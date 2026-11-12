@@ -86,7 +86,7 @@ class CoopDesyncDialogTest {
         RecordingDialog panel = show(dialogFor(seedReason()));
         String body = String.join("\n", panel.text.paragraphs);
 
-        int newCampaign = indexOfParagraphContaining(panel, "type the host's seed");
+        int newCampaign = indexOfParagraphContaining(panel, "Paste a fresh invite from the host into the co-op launcher");
         int loadSaves = indexOfParagraphContaining(panel, "load the co-op saves");
         assertTrue(newCampaign > 0, body);
         assertTrue(loadSaves > newCampaign, "remedies run in likelihood order: fresh campaign first");

@@ -1,5 +1,5 @@
 /*
- * COOP FORK - pinned Starsector 0.98a-RC8 canonical slipstream fade hook.
+ * COOP FORK - pinned Starsector 0.98.5a-RC5 canonical slipstream fade hook.
  * Original source: starfarer.api.zip!/com/fs/starfarer/api/impl/campaign/abilities/GenerateSlipsurgeAbility.java
  * Only SlipsurgeFadeInScript gains a controlled guard and primitive cursor hooks.
  * No native instance fields or save references are added. Without a registered non-dynamic
@@ -83,7 +83,7 @@ public class GenerateSlipsurgeAbility extends DurationAbilityWithCost2 {
 	public static float TRANSIT_MUSIC_SUPPRESSION = 1f;
 	public static String TRANSIT_SOUND_LOOP = "ui_slipsurge_travel_loop";
 	
-	public static float FUEL_COST_MULT = 5f;
+	public static float FUEL_COST_MULT = 3f;
 	public static float CR_COST_MULT = 0.25f;
 	public static float SENSOR_RANGE_MULT = 0.1f;
 	
@@ -118,7 +118,7 @@ public class GenerateSlipsurgeAbility extends DurationAbilityWithCost2 {
 		}
 
 		// COOP FORK: primitive cursor access for deserialized native scripts; no constructor mapping.
-		public static String coopFadeHookVersion() { return "0.98a-RC8/canonical-fade-1"; }
+		public static String coopFadeHookVersion() { return "0.98.5a-RC5/canonical-fade-1"; }
 		public SlipstreamTerrainPlugin2 coopFadeOwner() { return plugin; }
 		public CoopSlipstreamFadeBridge.SurgeWaveState coopCaptureFadeState() {
 			return new CoopSlipstreamFadeBridge.SurgeWaveState(true, done, index, elapsed, maxElapsed);

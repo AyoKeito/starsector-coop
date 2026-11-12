@@ -43,6 +43,7 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
     public static final String DWELLER_FLEET_LIGHT_KEY = CoopLightBridge.ENCOUNTER_FLEET_KEY;
     public static final String STATE_KEY = "$coopLightState";
     public static final String HOST_ENTITY_ID_KEY = "$coopLightHostEntityId";
+    private static final String JUVENILE_DWELLER_KEY = "$juvenileDweller";
     private static final int MAX_PENDING = 1_024;
     static final int MAX_REJECTED_RESULTS = 1_024;
 
@@ -84,7 +85,8 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
                     entity.getLocation().x, entity.getLocation().y, p.color.getRGB(),
                     p.frequencyMultMin, p.frequencyMultMax, p.frequencyChangeMult,
                     p.size, p.detectedRange, p.bonusMult, Math.max(0f, p.durationDays),
-                    p.pointsOverride, dweller, seed instanceof Number n ? n.longValue() : 0L);
+                    p.pointsOverride, dweller, seed instanceof Number n ? n.longValue() : 0L,
+                    p.permanent != null, entity.getMemoryWithoutUpdate().getBoolean(JUVENILE_DWELLER_KEY));
         }
 
         @Override public CustomCampaignEntityAPI create(LocationAPI location, CoopLightRecord record) {
@@ -108,6 +110,11 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
             } else {
                 entity.removeTag(Tags.DWELLER_LIGHT);
                 entity.getMemoryWithoutUpdate().unset(MemFlags.SALVAGE_SEED);
+            }
+            if (r.juvenileDweller()) {
+                entity.getMemoryWithoutUpdate().set(JUVENILE_DWELLER_KEY, true);
+            } else {
+                entity.getMemoryWithoutUpdate().unset(JUVENILE_DWELLER_KEY);
             }
         }
 
@@ -570,6 +577,7 @@ public final class CoopLightWorld implements CoopLightAuthority.LightWorld {
         p.frequencyChangeMult = r.frequencyChangeMult(); p.size = r.size();
         p.detectedRange = r.detectedRange(); p.bonusMult = r.bonusMult();
         p.durationDays = r.remainingDays(); p.pointsOverride = r.pointsOverride();
+        p.permanent = r.permanent() ? Boolean.TRUE : null;
     }
 
     private static void requireSameRequest(CoopLightCodec.Outcome outcome, CoopLightCodec.Request request, String actorId) {

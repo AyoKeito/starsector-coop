@@ -38,7 +38,7 @@ class CoopLightInteractionDiagnosticsTest {
         oldSettings = Global.getSettings();
         CoopLightBridge.clear();
         Global.setSettings(stub(SettingsAPI.class, (name, args) ->
-                "getVersionString".equals(name) ? "Starsector 0.98a-RC8" : null));
+                "getVersionString".equals(name) ? "Starsector 0.98.5a-RC5" : null));
     }
 
     @AfterEach void cleanup() {

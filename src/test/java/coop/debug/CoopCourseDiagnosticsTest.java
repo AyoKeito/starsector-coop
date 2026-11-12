@@ -40,7 +40,7 @@ class CoopCourseDiagnosticsTest {
         System.setProperty(CoopAgentBridge.PORT_PROPERTY, "30201");
         Global.setSector(null);
         refreshDiagnostics();
-        version = "Starsector 0.98a-RC8";
+        version = "Starsector 0.98.5a-RC5";
         Global.setSettings(proxy(SettingsAPI.class, (self, method, args) -> switch (method.getName()) {
             case "getVersionString" -> version;
             default -> throw new AssertionError(method.getName());
@@ -115,7 +115,7 @@ class CoopCourseDiagnosticsTest {
         refreshDiagnostics();
         version = "0.99a";
         scene.assertRefused();
-        version = "0.98a-RC8";
+        version = "0.98.5a-RC5";
         assertThrows(IllegalStateException.class, () -> CoopCourseDiagnostics.set(scene.sector, false, 1f, 2f, false));
         scene.paused = false;
         scene.assertRefused();

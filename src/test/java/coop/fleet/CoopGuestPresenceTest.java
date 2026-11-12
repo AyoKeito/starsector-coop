@@ -49,7 +49,7 @@ class CoopGuestPresenceTest {
 
     @Test
     void pinnedVersionMatchesTheBuildTheForksWereTakenFrom() {
-        assertEquals("0.98a-RC8", CoopPresenceRegistry.PINNED_VERSION);
+        assertEquals("0.98.5a-RC5", CoopPresenceRegistry.PINNED_VERSION);
     }
 
     @Test

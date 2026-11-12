@@ -2,11 +2,11 @@
  * ==========================================================================================
  * COOP FORK - DO NOT EDIT GAMEPLAY LOGIC. Targeted RNG determinism fork only.
  * ------------------------------------------------------------------------------------------
- * Starsector version : 0.98a-RC8
+ * Starsector version : 0.98.5a-RC5
  * Original source     : starfarer.api.zip!/com/fs/starfarer/api/util/Misc.java
  * Compiled into       : mods/coop/jars/coop-forks.jar (prepended to vmparams -classpath
  *                       ahead of starfarer.api.jar so the JVM resolves this copy first).
- * RNG replacements (vs vanilla 0.98a-RC8 source):
+ * RNG replacements (vs vanilla 0.98.5a-RC5 source):
  *   - line ~241  : `public static Random random = new Random();`
  *                  -> coop session-seeded default via CoopRandom.ofOrDefault("Misc.random").
  *   - line ~3482 : `return seedUniquifier() ^ System.nanoTime();`
@@ -69,6 +69,7 @@ import org.lwjgl.util.vector.Vector2f;
 import org.lwjgl.util.vector.Vector3f;
 
 import com.fs.starfarer.api.EveryFrameScript;
+import com.fs.starfarer.api.GameState;
 import com.fs.starfarer.api.Global;
 import com.fs.starfarer.api.MusicPlayerPlugin;
 import com.fs.starfarer.api.campaign.AICoreAdminPlugin;
@@ -158,7 +159,9 @@ import com.fs.starfarer.api.impl.campaign.econ.impl.ConstructionQueue.Constructi
 import com.fs.starfarer.api.impl.campaign.econ.impl.ShipQuality;
 import com.fs.starfarer.api.impl.campaign.econ.impl.ShipQuality.QualityData;
 import com.fs.starfarer.api.impl.campaign.events.BaseEventPlugin.MarketFilter;
+import com.fs.starfarer.api.impl.campaign.fleets.EconomyFleetAssignmentAI;
 import com.fs.starfarer.api.impl.campaign.fleets.FleetFactoryV3;
+import com.fs.starfarer.api.impl.campaign.fleets.PatrolAssignmentAIV4;
 import com.fs.starfarer.api.impl.campaign.ids.Conditions;
 import com.fs.starfarer.api.impl.campaign.ids.Difficulties;
 import com.fs.starfarer.api.impl.campaign.ids.Drops;
@@ -176,6 +179,7 @@ import com.fs.starfarer.api.impl.campaign.ids.Terrain;
 import com.fs.starfarer.api.impl.campaign.intel.FactionCommissionIntel;
 import com.fs.starfarer.api.impl.campaign.intel.MessageIntel;
 import com.fs.starfarer.api.impl.campaign.intel.contacts.ContactIntel;
+import com.fs.starfarer.api.impl.campaign.missions.hub.BaseHubMission;
 import com.fs.starfarer.api.impl.campaign.plog.PlaythroughLog;
 import com.fs.starfarer.api.impl.campaign.plog.SModRecord;
 import com.fs.starfarer.api.impl.campaign.population.CoreImmigrationPluginImpl;
@@ -190,6 +194,7 @@ import com.fs.starfarer.api.impl.campaign.procgen.StarSystemGenerator;
 import com.fs.starfarer.api.impl.campaign.procgen.themes.BaseThemeGenerator.OrbitGap;
 import com.fs.starfarer.api.impl.campaign.rulecmd.AddRemoveCommodity;
 import com.fs.starfarer.api.impl.campaign.rulecmd.unsetAll;
+import com.fs.starfarer.api.impl.campaign.rulecmd.salvage.MiscCMD.SupportFleetType;
 import com.fs.starfarer.api.impl.campaign.submarkets.BaseSubmarketPlugin;
 import com.fs.starfarer.api.impl.campaign.submarkets.StoragePlugin;
 import com.fs.starfarer.api.impl.campaign.terrain.AsteroidSource;
@@ -201,6 +206,7 @@ import com.fs.starfarer.api.impl.campaign.terrain.MagneticFieldTerrainPlugin;
 import com.fs.starfarer.api.impl.campaign.terrain.NebulaTerrainPlugin;
 import com.fs.starfarer.api.impl.campaign.terrain.PulsarBeamTerrainPlugin;
 import com.fs.starfarer.api.impl.campaign.terrain.StarCoronaTerrainPlugin;
+import com.fs.starfarer.api.impl.campaign.tutorial.TutorialMissionIntel;
 import com.fs.starfarer.api.impl.campaign.velfield.SlipstreamTerrainPlugin2;
 import com.fs.starfarer.api.impl.campaign.velfield.SlipstreamTerrainPlugin2.SlipstreamSegment;
 import com.fs.starfarer.api.impl.codex.CodexUnlocker;
@@ -216,6 +222,11 @@ import com.fs.starfarer.api.ui.TooltipMakerAPI;
 
 public class Misc {
 	
+	public static boolean EXTENDED_MODE_ENABLED = true;
+	public static boolean EXTENDED_MODE_DURING_NEW_GAME_SKILLS_TAB = false;
+
+	public static boolean USE_DMOD_REPAIR_IN_EXTENDED_MODE_ONLY = Global.getSettings().getBoolean("useDModRepairWithPartsInExtendedModeOnly");
+
 	public static boolean CAN_SMOD_BUILT_IN = true;
 	
 	public static String SIR = "Sir";
@@ -2206,13 +2217,22 @@ public class Misc {
 	}
 	
 	public static MarketAPI getSourceMarket(CampaignFleetAPI fleet) {
-		String id = fleet.getMemoryWithoutUpdate().getString(MemFlags.MEMORY_KEY_SOURCE_MARKET);
+		MemoryAPI mem = fleet.getMemoryWithoutUpdate();
+
+		Object test = mem.get(MemFlags.MEMORY_KEY_SOURCE_MARKET);
+		if (test instanceof MarketAPI) return (MarketAPI) test;
+
+		String id = mem.getString(MemFlags.MEMORY_KEY_SOURCE_MARKET);
 		if (id == null) return null;
 		MarketAPI market = Global.getSector().getEconomy().getMarket(id);
 		return market;
 	}
 	
 	public static SectorEntityToken getSourceEntity(CampaignFleetAPI fleet) {
+		if (fleet.getMemoryWithoutUpdate().get(MemFlags.MEMORY_KEY_SOURCE_MARKET) instanceof MarketAPI) {
+			MarketAPI market = (MarketAPI) fleet.getMemoryWithoutUpdate().get(MemFlags.MEMORY_KEY_SOURCE_MARKET);
+			return market.getPrimaryEntity();
+		}
 		String id = fleet.getMemoryWithoutUpdate().getString(MemFlags.MEMORY_KEY_SOURCE_MARKET);
 		if (id == null) return null;
 		MarketAPI market = Global.getSector().getEconomy().getMarket(id);
@@ -2335,6 +2355,50 @@ public class Misc {
 		return Difficulties.NORMAL.equals(Global.getSector().getDifficulty());
 	}
 	
+	public static boolean usePartsBasedDModRepairs() {
+		//if (true) return false;
+		return !USE_DMOD_REPAIR_IN_EXTENDED_MODE_ONLY || isExtended();
+	}
+
+	public static boolean FORCE_NOT_EXT_MODE = false;
+
+	public static boolean isExtended() {
+		if (FORCE_NOT_EXT_MODE) return false;
+		if (Global.getSector() == null) return false;
+		if (Global.getCurrentState() == GameState.TITLE) {
+			if (Global.getSettings().isGeneratingNewGame()) {
+				return Global.getSector().isExtMode();
+			}
+			return false;
+		}
+		if (Global.getCurrentState() == GameState.COMBAT &&
+				!Global.getCombatEngine().isInCampaign() &&
+				!Global.getCombatEngine().isInCampaignSim()) {
+			return false;
+		}
+		return Global.getSector().isExtMode();
+	}
+
+	public static float getDerelictRecoverableFraction() {
+		if (isExtended()) {
+			return Global.getSettings().getFloat("ext_derelictShipRecoverableFraction");
+		}
+		return 1f;
+	}
+	public static float getCryopodOfficersFraction() {
+		if (isExtended()) {
+			return Global.getSettings().getFloat("ext_cryopodOfficersFraction");
+		}
+		return 1f;
+	}
+	public static float getCryopodAdminsFraction() {
+		if (isExtended()) {
+			return Global.getSettings().getFloat("ext_cryopodAdminsFraction");
+		}
+		return 1f;
+	}
+
+
 	
 //	public static void main(String[] args) {
 //		System.out.println("TEST");
@@ -2399,7 +2463,7 @@ public class Misc {
 	}
 	public static float getAbyssalDepth(SectorEntityToken entity, boolean uncapped) {
 		if (entity == null || !entity.isInHyperspace()) return 0f;
-		return getAbyssalDepth(entity.getLocation());
+		return getAbyssalDepth(entity.getLocation(), uncapped);
 	}
 	
 	public static boolean isInsideBlackHole(CampaignFleetAPI fleet, boolean includeEventHorizon) {
@@ -3682,6 +3746,7 @@ public class Misc {
 	}
 	
 	public static void setSalvageSpecial(SectorEntityToken entity, Object data) {
+		//if (data == null) return;
 		entity.getMemoryWithoutUpdate().set(MemFlags.SALVAGE_SPECIAL_DATA, data);
 //		if (data instanceof ShipRecoverySpecialData) {
 //			BaseSalvageSpecial.clearExtraSalvage(entity);
@@ -3897,9 +3962,17 @@ public class Misc {
 	public static void giveStandardReturnToSourceAssignments(CampaignFleetAPI fleet, boolean withClear) {
 		if (withClear) {
 			fleet.clearAssignments();
+			fleet.getMemoryWithoutUpdate().set(FLEET_RETURNING_TO_DESPAWN, true);
+
+			MemoryAPI mem = fleet.getMemoryWithoutUpdate();
+			mem.unset(MemFlags.FLEET_MILITARY_RESPONSE);
+			mem.unset(MemFlags.FLEET_NO_MILITARY_RESPONSE);
+			mem.set(MemFlags.FLEET_BUSY, true);
+			fleet.removeScriptsOfClass(EconomyFleetAssignmentAI.class);
+			fleet.removeScriptsOfClass(PatrolAssignmentAIV4.class);
 		}
-		fleet.getMemoryWithoutUpdate().set(FLEET_RETURNING_TO_DESPAWN, true);
 		MarketAPI source = Misc.getSourceMarket(fleet);
+		//MarketAPI source = null;
 		if (source != null) {
 			fleet.addAssignment(FleetAssignment.GO_TO_LOCATION, source.getPrimaryEntity(), 1000f, "returning to " + source.getName());
 			fleet.addAssignment(FleetAssignment.ORBIT_PASSIVE, source.getPrimaryEntity(), 1f + 1f * (float) Math.random());
@@ -3920,6 +3993,15 @@ public class Misc {
 	public static void giveStandardReturnAssignments(CampaignFleetAPI fleet, SectorEntityToken where, String text, boolean withClear) {
 		if (withClear) {
 			fleet.clearAssignments();
+
+			fleet.getMemoryWithoutUpdate().set(FLEET_RETURNING_TO_DESPAWN, true);
+
+			MemoryAPI mem = fleet.getMemoryWithoutUpdate();
+			mem.unset(MemFlags.FLEET_MILITARY_RESPONSE);
+			mem.unset(MemFlags.FLEET_NO_MILITARY_RESPONSE);
+			mem.set(MemFlags.FLEET_BUSY, true);
+			fleet.removeScriptsOfClass(EconomyFleetAssignmentAI.class);
+			fleet.removeScriptsOfClass(PatrolAssignmentAIV4.class);
 		}
 		fleet.getMemoryWithoutUpdate().set(FLEET_RETURNING_TO_DESPAWN, true);
 		if (text == null) {
@@ -4387,7 +4469,10 @@ public class Misc {
 		float value = 0f;
 		
 		for (FleetMemberAPI member : plugin.getCargo().getMothballedShips().getMembersListCopy()) {
-			value += member.getBaseValue();
+			float extMult = Misc.isExtended() ? Global.getSettings().optFloatFromArray("ext_shipBuyPriceMult",
+								member.getHullSpec().getHullSize().ordinal() - 2, 1f) : 1f;
+			extMult *= Misc.isExtended() ? Global.getSettings().getFloat("ext_shipStoragePriceMult") : 1f;
+			value += member.getBaseValue() * extMult;
 		}
 		return value;
 	}
@@ -4464,10 +4549,21 @@ public class Misc {
 		return s;
 	}
 	
-	public static float getOfficerSalary(PersonAPI officer) {
-		return getOfficerSalary(officer, Misc.isMercenary(officer));
+	public static boolean isInCivilizedSpace() {
+		List<MarketAPI> markets = Misc.getMarketsInLocation(Global.getSector().getCurrentLocation());
+		for (MarketAPI market : markets) {
+			if (market.isHidden()) continue;
+			if (!market.isInEconomy()) continue;
+			return true;
+		}
+		return false;
 	}
-	public static float getOfficerSalary(PersonAPI officer, boolean mercenary) {
+
+	public static float getOfficerSalary(PersonAPI officer, boolean checkIfInPopulatedSystem) {
+		return getOfficerSalary(officer, Misc.isMercenary(officer), checkIfInPopulatedSystem, true);
+	}
+	public static float getOfficerSalary(PersonAPI officer, boolean mercenary, boolean checkIfInPopulatedSystem,
+			boolean checkActive) {
 		int officerBase = Global.getSettings().getInt("officerSalaryBase");
 		int officerPerLevel = Global.getSettings().getInt("officerSalaryPerLevel");
 		
@@ -4475,10 +4571,92 @@ public class Misc {
 		if (mercenary) {
 			payMult = Global.getSettings().getFloat("officerMercPayMult");
 		}
+		if (checkActive && !isOfficerActive(officer)) {
+			payMult *= getOfficerInactiveSalaryMult();
+		} else if (checkIfInPopulatedSystem) {
+			if (Misc.isInCivilizedSpace()) {
+				payMult *= Global.getSettings().getFloat("officerSalaryMultInPopulatedSystems");
+			}
+		}
+
+		float mult = isExtended() ? Global.getSettings().getFloat("ext_officerSalaryMult") : 1f;
+		payMult *= mult;
 		
 		float salary = (officerBase + officer.getStats().getLevel() * officerPerLevel) * payMult;
 		return salary;
 	}
+
+//	public static String ACCRUED_COMBAT_PAY_KEY = "$accruedCombatPay";
+//	public static void resetCombatPay(PersonAPI officer, float credits) {
+//		MemoryAPI mem = officer.getMemoryWithoutUpdate();
+//		mem.unset(ACCRUED_COMBAT_PAY_KEY);
+//
+//		needs to be set in player memory or whatever because: could dismiss officer, lol
+//
+//	}
+//	public static float getAccruedCombatPay(PersonAPI officer) {
+//		MemoryAPI mem = officer.getMemoryWithoutUpdate();
+//		return mem.getFloat(ACCRUED_COMBAT_PAY_KEY);
+//	}
+//	public static void accrueCombatPay(PersonAPI officer, float credits) {
+//		if (credits <= 0) return;
+//		MemoryAPI mem = officer.getMemoryWithoutUpdate();
+//		float curr = mem.getFloat(ACCRUED_COMBAT_PAY_KEY);
+//		curr += credits;
+//		mem.set(ACCRUED_COMBAT_PAY_KEY, curr);
+//	}
+
+	public static boolean combatPayEnabled(PersonAPI officer) {
+		if (!Misc.isExtended()) return false;
+		float salary = getOfficerSalary(officer, isMercenary(officer), false, false);
+		int index = HullSize.CAPITAL_SHIP.ordinal() - 2;
+		return (int)(salary * Global.getSettings().optFloatFromArray("ext_officerCombatPay", index, 1f)) > 0;
+	}
+
+	public static int getCombatPay(PersonAPI officer, FleetMemberAPI member) {
+		if (!Misc.isExtended()) return 0;
+		if (member == null || officer == null ||
+				officer.isDefault() || officer.isAICore() || officer.isPlayer()) {
+			return 0;
+		}
+
+		HullSize size = member.getHullSpec().getHullSize();
+
+		CampaignFleetAPI playerFleet = Global.getSector().getPlayerFleet();
+		if (playerFleet == null) return 0;
+
+		boolean found = false;
+		for (OfficerDataAPI od : playerFleet.getFleetData().getOfficersCopy()) {
+			if (officer== od.getPerson()) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) return 0;
+
+		float salary = getOfficerSalary(officer, isMercenary(officer), false, false);
+		int index = size.ordinal() - 2;
+		return (int)(salary * Global.getSettings().optFloatFromArray("ext_officerCombatPay", index, 1f));
+	}
+
+//	"officerActivateRequiresColony":true,
+//	"officerSalaryInactiveMultIfRequiresColony":0.1,
+	public static float getOfficerInactiveSalaryMult() {
+		//if (isOfficerActive(officer)) return 1f;
+		boolean requiresColony = Global.getSettings().getBoolean("officerActivateRequiresColony");
+		if (!requiresColony) return 1f;
+		return Global.getSettings().getFloat("officerSalaryInactiveMultIfRequiresColony");
+	}
+
+	public static boolean isOfficerActive(PersonAPI officer) {
+		if (!officer.getMemoryWithoutUpdate().contains("$inactive")) return true;
+		return !officer.getMemoryWithoutUpdate().getBoolean("$inactive");
+	}
+//	public static float getDaysSinceOfficerDeactivated(PersonAPI officer) {
+//		long ts = officer.getMemoryWithoutUpdate().getLong(MemFlags.OFFICER_DEACTIVATED_TIMESTAMP);
+//		if (ts <= 0f) return 0f;
+//		return Global.getSector().getClock().getElapsedDaysSince(ts);
+//	}
 	
 //	public static int getAccessibilityPercent(float a) {
 //		int result = (int) Math.round(a * 100f);
@@ -4762,6 +4940,10 @@ public class Misc {
 		cost.setWithBorder(false);
 		cost.setAlignment(Alignment.LMID);
 		
+		if (!withAvailable && res.length > 4) {
+			widthOverride = 98;
+		}
+
 		if (widthOverride > 0) {
 			cost.setComWidthOverride(widthOverride);
 		}
@@ -4845,6 +5027,10 @@ public class Misc {
 			CampaignFleetAPI fleet = Misc.getStationFleet(station);
 			if (fleet == null || fleet.isEmpty()) continue;
 			
+			boolean ignore = fleet.getMemoryWithoutUpdate() != null &&
+					fleet.getMemoryWithoutUpdate().getBoolean(MemFlags.FLEET_IGNORES_OTHER_FLEETS);
+			if (ignore) continue;
+
 			if (!isStationInSupportRange(from, fleet)) continue;
 			float dist = Misc.getDistance(from.getLocation(), station.getLocation());
 			
@@ -4860,6 +5046,10 @@ public class Misc {
 			if (!fleet.isStationMode()) continue;
 			if (fleet.isHidden()) continue;
 			
+			boolean ignore = fleet.getMemoryWithoutUpdate() != null &&
+					fleet.getMemoryWithoutUpdate().getBoolean(MemFlags.FLEET_IGNORES_OTHER_FLEETS);
+			if (ignore) continue;
+
 			if (!isStationInSupportRange(from, fleet)) continue;
 			float dist = Misc.getDistance(from.getLocation(), fleet.getLocation());
 			
@@ -4999,6 +5189,37 @@ public class Misc {
 			return tooltip.addPara("Design type: %s", pad, Misc.getGrayColor(), Global.getSettings().getDesignTypeColor(design), design);
 		}
 		return null;
+	}
+	public static LabelAPI addDesignTypeParaWithHullSize(TooltipMakerAPI tooltip, String design,
+									FleetMemberAPI member, float pad) {
+
+		String hullSizeText = null;
+		switch (member.getHullSpec().getHullSize()) {
+		case CAPITAL_SHIP: hullSizeText = "Capital"; break;
+		case CRUISER: hullSizeText = "Cruiser"; break;
+		case DESTROYER: hullSizeText = "Destroyer"; break;
+		case FRIGATE: hullSizeText = "Frigate"; break;
+		case FIGHTER: hullSizeText = "Fighter"; break;
+		}
+		if (member.isStation()) hullSizeText = "Station";
+		//hullSizeText = Misc.lcFirst(hullSizeText);
+		String hullSizeLabel = "hull size";
+		if (member.getHullSpec().hasTag(Tags.MONSTER)) {
+			hullSizeLabel = "relative size";
+		}
+
+		if (design == null || design.isEmpty() || design.equals("common")) {
+			LabelAPI label = tooltip.addPara(Misc.ucFirst(hullSizeLabel) + ": " + hullSizeText, Misc.getGrayColor(), pad);
+			label.setHighlightColors(Misc.getHighlightColor());
+			label.setHighlight(hullSizeLabel);
+			return label;
+		} else {
+			LabelAPI label = tooltip.addPara("Design type: " + design +
+					", " + hullSizeLabel + ": " + hullSizeText, Misc.getGrayColor(), pad);
+			label.setHighlightColors(Global.getSettings().getDesignTypeColor(design), Misc.getHighlightColor());
+			label.setHighlight(design, hullSizeText);
+			return label;
+		}
 	}
 	
 	public static float getFleetRadiusTerrainEffectMult(CampaignFleetAPI fleet) {
@@ -5270,6 +5491,16 @@ public class Misc {
 	public static int getMaxOfficers(CampaignFleetAPI fleet) {
 		int max = (int) fleet.getCommander().getStats().getOfficerNumber().getModifiedValue();
 		return max;
+	}
+	public static int getNumActiveNonMercOfficers(CampaignFleetAPI fleet) {
+		List<OfficerDataAPI> officers = fleet.getFleetData().getOfficersCopy();
+		int num = 0;
+		for (OfficerDataAPI od : officers) {
+			if (!isMercenary(od.getPerson())) {
+				if (od.isActivated()) num++;
+			}
+		}
+		return num;
 	}
 	public static int getNumNonMercOfficers(CampaignFleetAPI fleet) {
 		int count = 0;
@@ -5565,6 +5796,10 @@ public class Misc {
 		if (tags == null) {
 			tags = new HashSet<String>();
 			Global.getSector().getMemoryWithoutUpdate().set(RECOVERY_TAGS_KEY, tags);
+		}
+		if (Global.getSettings().getBoolean("allowAutomatedShipRecoveryWithoutSkill") &&
+				!TutorialMissionIntel.isTutorialInProgress()) {
+			tags.add(Tags.AUTOMATED_RECOVERABLE);
 		}
 		return tags;
 	}
@@ -6300,6 +6535,9 @@ public class Misc {
 	public static void makeStoryCritical(MemoryAPI memory, String reason) {
 		setFlagWithReason(memory, MemFlags.STORY_CRITICAL, reason, true, -1f);
 	}
+	public static void makeNonStoryCritical(String marketId, String reason) {
+		makeNonStoryCritical(Global.getSector().getEconomy().getMarket(marketId), reason);
+	}
 	public static void makeNonStoryCritical(MarketAPI market, String reason) {
 		makeNonStoryCritical(market.getMemoryWithoutUpdate(), reason);
 	}
@@ -6978,6 +7216,138 @@ public class Misc {
 		}
 		return null;
 	}
+
+	public static boolean isPlayerSupportFleet(CampaignFleetAPI fleet) {
+		if (fleet.getFaction() == Global.getSector().getPlayerFaction() &&
+				fleet.getMemoryWithoutUpdate().contains("$supportFleetType")) {
+			SupportFleetType type = Enum.valueOf(SupportFleetType.class,
+					fleet.getMemoryWithoutUpdate().getString("$supportFleetType"));
+			if (type == SupportFleetType.TASK_FORCE) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	public static boolean isFleetCivOnly(CampaignFleetAPI fleet) {
+		for (FleetMemberAPI curr : fleet.getFleetData().getMembersListCopy()) {
+			if (!curr.isCivilian()) return false;
+		}
+		return true;
+	}
+
+
+	public static int computeFleetMemberCrewSalary(FleetMemberAPI member, boolean withCrewFraction) {
+		if (member.getMinCrew() <= 0) return 0;
+		float salMult = member.getStats().getDynamic().getStat(Stats.SHIP_CREW_SALARY_MULT).getModifiedValue();
+		if (Misc.isExtended()) salMult *= Global.getSettings().getFloat("ext_crewSalaryMult");
+
+		float baseCrew = member.getHullSpec().getMinCrew();
+		float crewReq = member.getStats().getMinCrewMod().computeEffective(baseCrew);
+		salMult *= Math.min(5f, crewReq / Math.max(1f, baseCrew));
+
+		if (withCrewFraction) {
+			float f = member.getCrewFraction();
+			salMult *= f;
+		}
+
+		int salary = Math.round(member.getHullSpec().getCrewSalaryPerMonth() * salMult);
+		return salary;
+	}
+
+	/**
+	 * JUST crew, not marines.
+	 * @return
+	 */
+	public static int computeTotalCrewSalaryForPlayerFleet() {
+		CampaignFleetAPI playerFleet = Global.getSector().getPlayerFleet();
+		int crewSalary = Global.getSettings().getInt("crewSalary");
+		if (Misc.isExtended()) {
+			crewSalary *= Global.getSettings().getFloat("ext_crewSalaryMult");
+			crewSalary = (int) crewSalary;
+		}
+
+		int totalSalary = 0;
+		int totalCrew = playerFleet.getCargo().getCrew();
+		int alreadyPaidCrew = 0;
+
+		for (FleetMemberAPI member : playerFleet.getFleetData().getMembersListCopy()) {
+			int crew = (int) Math.min(member.getMinCrew(), member.getCrewComposition().getCrewInt());
+			if (crew <= 0) continue;
+			int currSalary = computeFleetMemberCrewSalary(member, true);
+			alreadyPaidCrew += crew;
+			totalSalary += currSalary;
+		}
+
+		totalSalary += Math.max(0, totalCrew - alreadyPaidCrew) * crewSalary;
+
+		return totalSalary;
+	}
+
+
+
+	public static boolean isSpacerShareEnabled() {
+		if (!isExtended() && Global.getSettings().getBoolean("spacerShareEnabledExtModeOnly")) {
+			return false;
+		}
+		if (!isSpacerStart() && Global.getSettings().getBoolean("spacerShareEnabledSpacerModeOnly")) {
+			return false;
+		}
+		return Global.getSettings().getFloat("ext_spacerSharePerMonth") > 0;
+	}
+	public static int computeSpacerShareThreshold() {
+		CampaignFleetAPI playerFleet = Global.getSector().getPlayerFleet();
+		int marineSalary = Global.getSettings().getInt("marineSalary");
+		if (Misc.isExtended()) {
+			marineSalary *= Global.getSettings().getFloat("ext_marineSalaryMult");
+			marineSalary = (int) marineSalary;
+		}
+		int crewCost = Misc.computeTotalCrewSalaryForPlayerFleet();
+		int marineCost = playerFleet.getCargo().getMarines() * marineSalary;
+
+
+		int totalSalary = crewCost + marineCost;
+
+		for (OfficerDataAPI od : playerFleet.getFleetData().getOfficersCopy()) {
+			float salary = Misc.getOfficerSalary(od.getPerson(), true);
+			totalSalary += (int)Math.round(salary);
+		}
+
+		float thresholdMonths = Global.getSettings().getFloat("ext_spacerShareThresholdSalaryMonths");
+		return (int)Math.round(totalSalary * thresholdMonths);
+	}
+
+
+	public static int getModifiedMissionReward(SectorEntityToken target, int reward) {
+		if (target == null) return reward;
+		//if (!Misc.isExtended()) return reward;
+
+		float dist = 0f;
+		StarSystemAPI askonia = Global.getSector().getStarSystem("askonia");
+		if(askonia != null) {
+			dist = Misc.getDistanceLY(target.getLocationInHyperspace(), askonia.getLocation());
+		} else {
+			dist = Misc.getDistanceLY(target.getLocationInHyperspace(), new Vector2f());
+		}
+
+		String prefix = "";
+		if (Misc.isExtended()) prefix = "ext_";
+
+		float min = Global.getSettings().getFloat(prefix + "missionRewardMinDist");
+		float max = Global.getSettings().getFloat(prefix + "missionRewardMaxDist");
+		float bonus = Global.getSettings().getFloat(prefix + "missionRewardMaxBonusFraction");
+		float cap = Global.getSettings().getFloat(prefix + "missionRewardBonusCap");
+
+		if (dist < min) return reward;
+
+		if (dist > max) dist = max;
+
+		float bonusMult = bonus * (dist - min) / (max - min);
+
+		int bonusCredits = (int) Math.min(cap, bonusMult * reward);
+		return BaseHubMission.getRoundNumber(reward + bonusCredits);
+	}
+
 }
 
 

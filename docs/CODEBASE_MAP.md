@@ -1,15 +1,15 @@
 # Codebase Map
 
-Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-11-02 (0.2.0 preview).
+Orientation map for the Starsector co-op mod. Last checked against the tree on 2026-11-13 (0.2.1 preview).
 
 P26 remains PARTIAL. M1/M2, shared wrecks and M3 are accepted within their recorded scope. M4/M5 have bounded MCP execution, lifecycle and travel evidence; native visual acceptance remains open. Guest-proximity encounter triggering remains unbuilt. Decisions and deferred gates live in [the plan](COOP_MP_IMPLEMENTATION_PLAN_V1.md#phase-26-hyperspace-ambient-world-replication-post-v1--slipstreams--abyssal-encounters); dated M3, M4 and M4/M5 acceptance reports retain the run history.
 
 ## Stack
 
 - Java 17 toolchain (`build.gradle`: `JavaLanguageVersion.of(17)`), Gradle wrapper (`gradlew`)
-- Compiles against the install's `starsector-core` jars: `starfarer.api.jar`, `xstream-1.4.10.jar`,
-  `log4j-1.2.9.jar`, `json.jar`, `lwjgl.jar`, `lwjgl_util.jar`; the install is
-  `../../starsector-core` unless `-PstarsectorCore` or `STARSECTOR_CORE` points elsewhere
+- Compiles against Starsector 0.98.5a-RC5's `starsector-core` jars, including `starfarer.api.jar`,
+  `xstream-1.4.10.jar`, `log4j-1.2.9.jar`, `json.jar`, `lwjgl.jar` and `lwjgl_util.jar`.
+  Set `-PstarsectorCore` or `STARSECTOR_CORE` when `../../starsector-core` points at another install.
 - Three jars out of one build: `jars/coop.jar` (mod classloader), `jars/coop-forks.jar` (system
   classloader, prepended on the install's `vmparams` `-classpath` so forked `com.fs.starfarer.api.*`
   classes shadow the real ones), `jars/coop-launcher.jar` (own JVM).
@@ -531,8 +531,8 @@ src/launcher/java/coop/launcher/   22 classes
   `..\mods\coop\jars\coop-forks.jar;` after the ` -classpath ` marker in `<install>\vmparams`
   (ISO-8859-1, no trailing newline, backup first), and appending `"coop"` to
   `<install>\mods\enabled_mods.json`. An `AccessDeniedException` offers an elevated relaunch.
-- **Bug report** zip and **update check** (the launcher reads `releases/latest`, which is why a
-  release is never marked prerelease).
+- **Bug report** zip and **update check.** The launcher reads GitHub's `releases/latest` for stable
+  releases. Players install preview ZIPs from their release pages.
 - **Rule: the launcher module stays free of Starsector API imports.** `starfarer.api.jar` is
   deliberately absent from `sourceSets.launcher.compileClasspath`, so the compiler catches a slip.
   The launcher reuses `CoopPortMapper`, `CoopConnectionDoctor`, `CoopOptionsRegistry` and
@@ -623,7 +623,7 @@ game's own `vmparams` do, because XStream 1.4.10 reflects into `java.base` durin
 | `README.md` | the player-facing pitch and release links |
 | `README_DEV.md` | every command: build, test, package, launch, two-client test, bridge verbs, release checklist, save-visible state |
 | `CLAUDE.md` | the short version an agent session gets wrong without being told |
-| `CHANGELOG.md` | per-release notes; 0.2.0 preview at the head |
+| `CHANGELOG.md` | per-release notes, starting with the 0.2.1 preview |
 | `docs/COOP_MP_DESIGN.md` | design rationale |
 | `docs/COOP_MP_IMPLEMENTATION_PLAN_V1.md` | the phase ledger and every agreed decision. **Canonical for status** - when it and a phase's checkboxes disagree, the ledger wins |
 | `docs/starsector-runtime-limitations.md` | engine and sandbox facts plus accepted divergences; current facts only, entries are deleted when their fix lands |

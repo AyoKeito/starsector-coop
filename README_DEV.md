@@ -139,29 +139,19 @@ campaign.
 
 ## Build, Test, And Package
 
-Use the repeatable build script:
+Use the repeatable build script with the 0.98.5a-RC5 install:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scripts\build.ps1'
+powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scripts\build.ps1' -BaseInstallRoot 'C:\Program Files (x86)\Starsector'
 ```
 
-Equivalent direct Gradle command:
+From the checkout, pass the same engine path to Gradle:
 
 ```powershell
-powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop'; .\gradlew.bat clean test build"
+.\gradlew.bat '-PstarsectorCore=C:\Program Files (x86)\Starsector\starsector-core' clean test build
 ```
 
-Run unit tests only:
-
-```powershell
-powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop'; .\gradlew.bat test"
-```
-
-Build only the mod jar:
-
-```powershell
-powershell -NoProfile -Command "Set-Location 'K:\Starsector\mods\coop'; .\gradlew.bat jar"
-```
+Use `test` for unit tests only or `jar` to rebuild only the main mod jar.
 
 The packaged mod jar is written to:
 
@@ -281,29 +271,32 @@ powershell -NoProfile -Command "Select-String -Path 'K:\Starsector\starsector-co
 
 ## Two-Client Local Coop Test
 
-Create isolated host and guest Starsector copies under `K:\Starsector-coop-test`:
+From the checkout, create an isolated RC5 pair in the ignored scratch directory:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scripts\setup-two-client-test.ps1'
+$baseInstall = 'C:\Program Files (x86)\Starsector'
+$testRoot = Join-Path (Get-Location).Path 'tmp_ff_analysis\rc5-smoke'
+.\scripts\setup-two-client-test.ps1 -BaseInstallRoot $baseInstall -TestRoot $testRoot
 ```
 
 Build and deploy the current coop mod into both test clients:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scripts\deploy-to-test-clients.ps1'
+.\scripts\build.ps1 -BaseInstallRoot $baseInstall
+.\scripts\deploy-to-test-clients.ps1 -SkipBuild -TestRoot $testRoot
 ```
 
 Launch host and guest:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scripts\launch-host.ps1' -Port 7777
-powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scripts\launch-guest.ps1' -HostAddress '127.0.0.1' -Port 7777
+.\scripts\launch-host.ps1 -TestRoot $testRoot -Port 7777
+.\scripts\launch-guest.ps1 -TestRoot $testRoot -HostAddress '127.0.0.1' -Port 7777
 ```
 
 After both clients load a campaign, inspect coop log lines from both profiles:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File 'K:\Starsector\mods\coop\scripts\tail-two-client-logs.ps1'
+.\scripts\tail-two-client-logs.ps1 -TestRoot $testRoot
 ```
 
 On screen, both clients draw a coop line under the vanilla fps overlay (top-right): `HOST · session active`, `GUEST · session active · paused by host`, and on the guest the clock drift in whole game-hours once it reaches an hour. `-Dcoop.hud.disable=true` turns it off. The guest's New Game dialog shows the join target on its Continue option and pins seed, sector size and star age; `-Dcoop.sectorSize=small|normal` and `-Dcoop.sectorAge=young|average|old|mixed` override the panel defaults on both roles when a non-default world is wanted. `-Dcoop.clock.disable=true` turns off the Phase 7c clock reconciler (guest only). The Phase 20 networking properties (`coop.hostPort`, `coop.connectHost`, `coop.connectPort`, `coop.password`, `coop.maxGuests`, `coop.reconnectGraceSeconds`, `coop.portMapping`, `coop.debug.wiretap`, `coop.debug.wiretapSample`) are documented with their defaults in `docs/player/INSTALL.md`, "Every setting".
@@ -390,7 +383,7 @@ Encounter-aware `teleport`, entity `memory`, `objective` and `surveyset` accept 
 | `encounters` | Recipe-bearing abyssal systems keyed by Host instance id. Each row includes the structured saved recipe plus a fresh gameplay manifest of in-system and linked hyperspace members: canonical ids, spec, position/radius, orbit/focus, threat tag, survey/ruins/hint state and native ghost-wreck salvage. It also verifies sector/location lookup for each canonical id and reports legacy, missing and untracked members. Encounter `ss_diff` requires matching paused timestamps and untruncated tables, excludes cosmetic names/catalog ids and returns bounded differences with the full mismatch count. Optional `{"lifetime":true}` adds read-only Host despawner inputs and `canDespawn`; Guest reports unavailable. Omit it for the unchanged default manifest/comparison. |
 | `encounterspawn` | Host-only QA action, `{creator:"parent"}` or `{creator:"dire"}`, with exact `x`, `y`, `depth` and optional `threatRollRan` and decimal-string `seed`. Calls the native creator once and requires exactly one new temporary abyssal system. The optional seed override is scoped to that call and cleared in `finally`; special selection remains native. No calendar writes occur. This prepares reproducible live M2 fixtures and does not prove organic encounter cadence or solo-Guest triggering. |
 | `clockalign` / `ss_align_clocks` | explicit QA action before starting a fade or recording mature terrain. The MCP helper checks both clients share an active session and effective pause, advances only the lower clock to the higher timestamp (at most one game day), then rereads both. It changes the calendar/cache, not native terrain timers: never repeatedly align during a fade. That manufactures a phase difference. Compare naturally equal timestamps during the fade. Normal clock reconciliation remains unchanged. |
-| `streamadd`, `streamdespawn` | host-only live-test actions: add a seasonal stream for the current month, or start a zero-delay, ten-day despawn on active seasonal streams. `streamadd` reports `created`, new ids and configuration diagnostics; an exhausted native route list is a no-op. Once all seasonal terrain is gone, explicit `{rearmUsedRoute:true}` temporarily rearms one used route through the native builder and restores its used flag. It refuses live seasonal terrain, absent/empty config or remaining unused routes, and requires actual new terrain. Actions are never replayed after a dropped bridge socket. |
+| `streamadd`, `streamdespawn` | Host-only live-test actions. Add a seasonal stream for the current month and cycle or start a zero-delay, ten-day despawn on active seasonal streams. `streamadd` reports `created`, new ids and configuration diagnostics. An exhausted native route list creates no terrain. Once all seasonal terrain is gone, explicit `{rearmUsedRoute:true}` temporarily rearms one used route through the native builder and restores its used flag. It refuses live seasonal terrain, absent/empty config or remaining unused routes, and requires actual new terrain. Actions are never replayed after a dropped bridge socket. |
 | `landmarks` | hypershunts, cryosleepers, gates, stable locations and the gate hauler, filterable with `kinds`. Not all one-per-sector — a stock sector has 15-20 gates and more stable locations, which is what `kinds` and the default limit of 25 are for. The two colony-relevance ranges are read live off `ItemEffectsRepo.CORONAL_TAP_LIGHT_YEARS` and `Cryorevival.MAX_BONUS_DIST_LY` rather than copied, and are omitted rather than guessed if the read fails; vanilla measures them from the colony, not the fleet, so the row's `distanceLy` is not the distance the game tests. There is no `occupied` field on a stable location because vanilla deletes the entity when you build on it, so one that still exists is free. |
 | `entities` | everything in one location — `system` (id, name, or `"hyperspace"`; default is wherever the local player fleet is) and `kinds` (`planet`, `station`, `jumpPoint`, `relay`, `base`, `fleet`, `other`). Rows carry `id`, `name`, `kind`, `type`, `faction`, location-local `x`/`y`, sorted `tags`, `orbitFocus`, `hidden`, `discoverable` and `marketId`, capped at 300 with a `truncated` flag. **Asteroids, orbital junk, ring bands and non-debris terrain are dropped by default** and `clutterExcluded` says so: in Corvus and Askonia those four ate the entire 300-row cap and the system's gate never appeared in a list of everything in the system. Terrain is judged by its terrain id rather than its class, so a debris field stays — it is a salvage target that happens to be implemented as terrain. Passing `kinds` at all turns the filter off (asteroids are only reachable as `other`, and filtering out what you asked for is not an answer), as does `includeClutter: true`. **This is how you get a hidden base's id.** `base` is decided by the market being hidden — the same discriminator the replicator uses — and is tested before `station`, because a hidden base is a station too. `teleport` never refused those ids; nothing emitted them. `landmarks` covers worldgen one-offs by tag and `markets` covers the economy, and a runtime-minted base with a market outside the economy index is in neither. The `marketId` on a base row is the key to look up in `status`'s `baseMarketIds` to see whether the guest has paired it. |
 | `intel` | the local player's intel entries: `class`, `title`, sorted `tags`, `isNew` / `isEnding` / `isEnded` / `important` / `hidden`, `factionId`, and an `extra` object — `progress` / `maxProgress` / `factors` for anything descending from `BaseEventIntel`, plus whatever the mod's own pages report through `CoopIntelFacts` (the expedition warning's kind/status/target/ETA, the stats page's team totals). `filter` is a case-insensitive substring of class or title, `limit` defaults to 50. The title comes from `getSmallDescriptionTitle()`, which is what `BaseIntelPlugin` delegates to `getName()`; `getName()` itself is `protected` and the sandbox forbids the reflection that would open it. A separate `hostileActivity` block answers `present` / `progress` / `factors` straight off `HostileActivityEventIntel.get()`, so "no Hostile Activity on the guest" is a positive answer rather than the absence of a row — the entry can be present and hidden, and a scan would call that absent. |

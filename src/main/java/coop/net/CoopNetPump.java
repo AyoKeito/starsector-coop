@@ -56,6 +56,7 @@ import coop.time.CoopClockReconciler;
 import coop.time.CoopFastForwardLock;
 import coop.time.CoopSharedPauseCoordinator;
 import coop.time.CoopTimeLock;
+import coop.ui.CoopCampaignNotice;
 import coop.ui.CoopHudState;
 import coop.util.CoopDebug;
 import coop.util.CoopFrameProfiler;
@@ -3869,7 +3870,7 @@ public class CoopNetPump implements EveryFrameScript {
             CoopLog.warn(CoopNetPump.class, "Invalid coop networking JVM properties", ex);
             return;
         }
-        if (!config.isPresent()) {
+        if (!config.isPresent() || refuseSurvivalCampaign()) {
             return;
         }
         try {
@@ -3891,6 +3892,18 @@ public class CoopNetPump implements EveryFrameScript {
         } catch (RuntimeException ex) {
             reportStartupFailure(config, ex);
         }
+    }
+
+    private static boolean refuseSurvivalCampaign() {
+        SectorAPI sector = Global.getSector();
+        if (sector == null || !sector.isExtMode()) {
+            return false;
+        }
+        String message = "This save uses Survival mode. Load a Normal campaign save or start"
+                + " a new co-op campaign.";
+        CoopLog.warn(CoopNetPump.class, message);
+        CoopCampaignNotice.install(sector, message);
+        return true;
     }
 
     /**
@@ -3991,6 +4004,10 @@ public class CoopNetPump implements EveryFrameScript {
         memory.unset(HOST_PORT_FLAG);
         memory.unset(CONNECT_HOST_FLAG);
         memory.unset(CONNECT_PORT_FLAG);
+
+        if (refuseSurvivalCampaign()) {
+            return;
+        }
 
         try {
             if (hosting) {

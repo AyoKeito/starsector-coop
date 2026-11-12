@@ -28,20 +28,20 @@ Everything below is the same thing at length, plus what to do when a step does n
 
 | Thing | Requirement |
 |---|---|
-| Starsector version | `0.98a-RC8` on both. Other versions are refused for co-op. |
+| Starsector version | `0.98.5a-RC5` on both. Other versions are refused for co-op. |
 | The co-op mod | The same packaged download, unzipped on both. Different build identities are refused even when the version number matches. |
 | Mod folder name | Exactly `coop`, so the path reads `<Starsector>\mods\coop` on both. |
 | Every other mod | Same list, same versions, on both. |
 | Ironman | Off on both. A session where either side is in Ironman mode is refused. |
+| Campaign mode | Normal on both. Co-op new games use Normal mode automatically. Loading a Survival save blocks the co-op connection. |
 
 Section 8 explains what the refusal message looks like and how the check works.
 
 ## 2. Unpack the mod
 
-Download the attached `coop-<version>.zip` from the chosen [release page](https://github.com/AyoKeito/starsector-coop/releases),
-not GitHub's **Source code** archives. Both players need the same packaged ZIP, including its launcher,
-game jars and data. For a preview marked **Pre-release**, open that release directly and install it
-manually; the launcher's update check follows stable releases and does not offer previews.
+Download `coop-0.2.1.zip` from the [0.2.1 preview release](https://github.com/AyoKeito/starsector-coop/releases/tag/v0.2.1).
+Both players need this packaged ZIP, which contains the launcher, game jars and data. Install it
+manually. The launcher's update check follows stable releases.
 
 Unzip so that `mod_info.json` sits directly in `<Starsector>\mods\coop`:
 
@@ -99,7 +99,7 @@ Find the text ` -classpath ` and insert this immediately after it, semicolon inc
 ..\mods\coop\jars\coop-forks.jar;
 ```
 
-The classpath on a stock 0.98a-RC8 Windows install starts like this:
+The classpath on a stock 0.98.5a-RC5 Windows install starts like this:
 
 ```text
  -classpath janino.jar;commons-compiler.jar;commons-compiler-jdk.jar;starfarer.api.jar;...
@@ -202,6 +202,9 @@ this session is a fresh campaign, so neither of you loads anything. `No co-op sa
 on this machine: start a New Game with the seed above` means the campaign your partner picked has
 never been saved on your PC, which is what a first session looks like from the guest's side.
 
+In **New Game**, hover over the co-op **Continue** button to see the seed used for world generation.
+Starsector's **Domain sector registry ID** field can show a different ID.
+
 If the launcher cannot read `saves\common\coop_saves.json.data`, or that file was written by a newer
 version of the mod than the launcher, it says so on that same line and stops naming saves. Nothing
 else changes and **Launch Starsector** still works.
@@ -300,9 +303,9 @@ display. `REPORTING.md` explains the report contents.
 3. Guest: press **Join a game**, **Paste invite**, then **Check connection**. The status area shows
    the result; **Details** explains any problem. The footer explains anything blocking launch.
 4. Both press **Launch Starsector**, then **Play** in the vanilla launcher window.
-5. Follow the save advice under each launcher's session card: start New Game for a fresh campaign,
-   or load the named co-op save to continue. For a new game, the guest's Continue option names the
-   host and the seed is already filled in from the invite.
+5. Follow the save advice under each launcher's session card. Start **New Game** for a fresh campaign
+   or load the named co-op save to continue. For a new game, the guest's **Continue** option names
+   the host and its tooltip shows the seed applied from the invite.
 6. Both games load paused into the lobby, with the guest's join steps listed as they pass. The host
    presses Start; a three second countdown runs; the clock starts.
 7. The status line in the corner reads `HOST · waiting for guest`, then `session active` on both.
@@ -557,7 +560,7 @@ same way.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `coop.newGameSeed` | unset | The sector seed, e.g. `MN-1234567890123456789`. Same value on both PCs; both New Game dialogs are pinned to it. |
+| `coop.newGameSeed` | unset | The sector seed used for world generation. Set the same value on both PCs, for example `MN-1234567890123456789`. |
 | `coop.sectorSize` | unset | `small` or `normal`. Omit for the panel default (`normal`). Must match. |
 | `coop.sectorAge` | unset | `young`, `average`, `old` or `mixed`. Omit for the panel default (`mixed`). Must match. |
 | `coop.adoptCampaignId` | `false` | Guest only. Overrides the seed lock and adopts the host's in-flight campaign id, at the cost of this save's progress. Struck from your settings file as soon as it has been published, so it applies to one launch and no other. |

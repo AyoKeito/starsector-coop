@@ -482,15 +482,13 @@ public abstract class CoopDesyncDialog implements InteractionDialogPlugin, CoopD
                     + " the two maps and nothing can be kept in step.");
             String hostSeed = reason.hostSeed();
             if (role == CoopConnectionRole.HOST) {
-                body.add("Most likely fix: " + partner() + " starts a new campaign from your seed."
-                        + " Read it out to them: " + (reason.hostSeed().isEmpty()
-                        ? "it is on the co-op line of your log" : reason.hostSeed()));
-            } else if (!hostSeed.isEmpty()) {
-                body.add("Most likely fix: start a new campaign here and type the host's seed into the"
-                        + " seed field on the New Game screen: " + hostSeed);
+                body.add("Send " + partner() + " a fresh invite from the co-op launcher so they can"
+                        + " start a New Game with your seed."
+                        + (hostSeed.isEmpty() ? "" : " Your seed is " + hostSeed + "."));
             } else {
-                body.add("Most likely fix: ask the host for their seed and start a new campaign here"
-                        + " with it typed into the seed field on the New Game screen.");
+                body.add("Paste a fresh invite from the host into the co-op launcher, then launch"
+                        + " and start a New Game."
+                        + (hostSeed.isEmpty() ? "" : " The host's seed is " + hostSeed + "."));
             }
             body.add("Otherwise: both of you load the co-op saves written during an earlier session."
                     + " Those already share a sector.");

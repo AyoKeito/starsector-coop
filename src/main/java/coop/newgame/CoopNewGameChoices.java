@@ -1,5 +1,6 @@
 package coop.newgame;
 
+import com.fs.starfarer.api.characters.CharacterCreationData;
 import com.fs.starfarer.api.impl.campaign.procgen.StarAge;
 import coop.config.CoopOptionsRegistry;
 import coop.net.CoopConnectionRole;
@@ -11,15 +12,11 @@ import java.util.Locale;
 
 /**
  * Pure decision logic behind {@link CoopNewGameDialogPlugin}: launch-property text in, world-setting
- * values and banner strings out. Deliberately free of engine calls so it is unit-testable without a
- * running game -- {@link StarAge} is the one engine type referenced, and only because "property text
- * to enum value" is the decision being made here. It is a plain enum with no static initialiser that
- * touches {@code Global}, so loading it in a test costs nothing.
+ * values and banner strings out. Applying those choices takes the character creation data supplied
+ * by the dialog.
  *
- * <p>Value vocabulary is taken from the 0.98a new-game options panel itself (verified in the
- * bytecode, not assumed): the two sector-size radio buttons write the literals {@code "small"} and
- * {@code "normal"}, and the star-age buttons write {@link StarAge} constants with the {@code ANY}
- * button labelled "Mixed" -- hence {@code mixed} is accepted as an alias for {@code ANY}.
+ * <p>The engine's sector sizes are {@code "small"} and {@code "normal"}. The star-age panel labels
+ * {@link StarAge#ANY} as "Mixed", so the launcher accepts that spelling too.
  */
 final class CoopNewGameChoices {
 
@@ -47,6 +44,13 @@ final class CoopNewGameChoices {
     record Choices(String sectorSize, StarAge sectorAge, List<String> warnings) {
         Choices {
             warnings = warnings == null ? List.of() : List.copyOf(warnings);
+        }
+
+        void applyTo(CharacterCreationData data) {
+            data.setSectorSize(sectorSize);
+            data.setSectorAge(sectorAge);
+            // Survival applies different campaign mechanics and start scripts before the seed lock.
+            data.setExtMode(false);
         }
     }
 
@@ -138,13 +142,13 @@ final class CoopNewGameChoices {
             // by the host's invite, through coop.newGameSeed - and the seed lock verifies the two
             // sectors match afterwards. Nothing is fetched from the host at this point.
             return "Joining coop host " + trimToEmpty(host) + ":" + port
-                    + ". The seed " + trimToEmpty(seedString) + " came from the host's invite, and"
-                    + " sector size and star age are pinned to match the host, so all three fields"
-                    + " below are locked.";
+                    + ". The invite sets seed " + trimToEmpty(seedString)
+                    + ", sector size and star age. Co-op uses Normal campaign mode.";
         }
         if (role == CoopConnectionRole.HOST) {
             return "Hosting a coop game on port " + port + ". Seed " + trimToEmpty(seedString)
-                    + "; sector size and star age are pinned so the guest can generate the same sector.";
+                    + ", sector size and star age are pinned so the guest can generate the same sector."
+                    + " Co-op uses Normal campaign mode.";
         }
         return "";
     }
