@@ -16,13 +16,13 @@
       "key": "partial",
       "icon": "◐",
       "label": "In progress",
-      "note": "P26 reliability and preview smoke are checked; full M4/M5 visual acceptance remains open."
+      "note": "P26 is merged into main with M4/M5 visual acceptance still open."
     },
     {
       "key": "next",
       "icon": "▶",
       "label": "Next up",
-      "note": "Continue full P26 native visual acceptance; deferred M3 edges remain non-blocking."
+      "note": "Run the paired native P26 storm and ghost/trail visual checks."
     },
     {
       "key": "queued",
@@ -34,18 +34,18 @@
       "key": "postv1",
       "icon": "◌",
       "label": "Post-V1",
-      "note": "P26 remains partial, P22/P25/P27 remain queued, and P33 is built with native follow-ups."
+      "note": "P26 awaits visual checks, P22/P25/P27 remain queued, and P33 has native follow-ups."
     }
   ],
-  "hereHead": "You are here: 0.2.0 preview smoke checked; full visual acceptance remains.",
-  "here": "<b>0.2.0 preview passed its bounded release smoke.</b> Install the same ZIP manually; 0.1.5 remains stable. The user accepts a minor visual mismatch for this preview. Full M4/M5 native visual acceptance and Guest-proximity generation remain open. Deferred M3 edges remain non-blocking; computer use remains paused.",
+  "hereHead": "You are here: P26 merged into main; visual checks remain.",
+  "here": "<b>P26 is on main.</b> The 0.2.0 preview passed its bounded release smoke, and 0.1.5 remains stable. Next are paired M4 storm and M5 ghost/trail visual checks. Guest-proximity encounter generation remains open.",
   "attention": [
     {
       "sev": "scope",
       "sevLabel": "P26 remaining milestones",
       "head": "Verify M4 storms and M5 ghosts/trails",
-      "state": "reliability fixes complete; native visuals unverified",
-      "body": "Compare shared storm phases and owner-only boost/clearing effects, then inspect local ghosts and shared trails. Pass: matching global weather, effects confined to the correct owner, and correct ghost/trail rendering. Resume computer use when requested; record evidence limits in the acceptance reports."
+      "state": "paired native visual checks open on main",
+      "body": "Compare shared storm phases and clearing, owner-only strikes and boosts, Guest-local ghosts and shared trail rendering. The <a href=\"P26_REMAINING_TESTS.md\">P26 test checklist</a> has the setup and pass criteria."
     },
     {
       "sev": "scope",
@@ -912,7 +912,7 @@
         "M5: visual ghosts/trails; evidence limits remain recorded.",
         "Guest-proximity encounter triggering; deferred M3 edge cases."
       ],
-      "note": "Milestone details and test evidence are in the implementation plan and dated acceptance reports."
+      "note": "See the P26 test checklist above and the dated acceptance reports."
     },
     {
       "id": "27",
