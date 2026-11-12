@@ -1,15 +1,23 @@
 package coop.combat;
 
+import com.fs.starfarer.api.Global;
+import com.fs.starfarer.api.SettingsAPI;
 import com.fs.starfarer.api.campaign.CampaignFleetAPI;
 import com.fs.starfarer.api.campaign.CampaignUIAPI;
 import com.fs.starfarer.api.campaign.FleetDataAPI;
+import com.fs.starfarer.api.campaign.FactionAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.combat.CombatEngineAPI;
+import com.fs.starfarer.api.combat.BattleCreationContext;
 import com.fs.starfarer.api.combat.ShipAPI;
 import com.fs.starfarer.api.combat.ShipHullSpecAPI;
 import com.fs.starfarer.api.impl.campaign.ids.MemFlags;
+import com.fs.starfarer.api.impl.campaign.ids.Factions;
+import com.fs.starfarer.api.fleet.FleetGoal;
+import com.fs.starfarer.api.util.Misc;
+import coop.ambient.CoopLightBridge;
 import coop.fleet.CoopMirrorTags;
 import coop.net.CoopConnectionRole;
 import coop.net.CoopMessages;
@@ -17,6 +25,7 @@ import coop.net.CoopNetService;
 import coop.session.CoopPlayerInfo;
 import coop.session.CoopSessionState;
 import coop.time.CoopSharedPauseCoordinator;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
@@ -27,6 +36,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
 import coop.testing.RecordingNetService;
+import coop.testing.ApiProxies;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -40,6 +50,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * smoke test instead. What is asserted here is the queue the banners are posted from.
  */
 class CoopBattleBridgeTest {
+    @BeforeAll
+    static void initializeNativeUtilities() throws ClassNotFoundException {
+        SettingsAPI previousSettings = Global.getSettings();
+        try {
+            Global.setSettings(ApiProxies.whiteSettings());
+            Class.forName(Misc.class.getName(), true, Misc.class.getClassLoader());
+        } finally {
+            Global.setSettings(previousSettings);
+        }
+    }
 
     // ---- combat pause intent, both directions ----------------------------------------------------
 
@@ -799,6 +819,52 @@ class CoopBattleBridgeTest {
         assertEquals(List.of(List.of()), concluded);
     }
 
+    @Test
+    void aGuestLightBattlePausesTheHostAndFinishesWithoutInventingAHostNpcResult() {
+        Fixture guest = Fixture.guest();
+        Fixture host = Fixture.host();
+        Engine world = new Engine(null, List.of());
+        CampaignFleetAPI dweller = (CampaignFleetAPI) world.mirror;
+        memoryOf(dweller).set(CoopLightBridge.ENCOUNTER_FLEET_KEY,
+                "light:01234567-89ab-4def-8123-0123456789ab");
+        SettingsAPI previousSettings = Global.getSettings();
+        BattleCreationContext context;
+        try {
+            Global.setSettings(ApiProxies.whiteSettings());
+            context = new BattleCreationContext((CampaignFleetAPI) world.playerFleet,
+                    FleetGoal.ATTACK, dweller, FleetGoal.ATTACK);
+        } finally {
+            Global.setSettings(previousSettings);
+        }
+        CombatEngineAPI combat = combatEngine(List.of(), false, context);
+        List<CoopBattleResult> results = new ArrayList<>();
+        guest.bridge.setBattleResultSink(results::add);
+
+        assertEquals(List.of(), CoopBattleBridge.opponentCoopFleetIds(combat, false));
+        assertEquals(List.of(), CoopBattleBridge.opponentCoopFleetIds(combat, true),
+                "a Host light battle has no persistent NPC counterpart either");
+        guest.bridge.onCombatFrame(combat, 1_000L);
+        CoopMessages.Message begin = guest.service.sent.stream()
+                .filter(m -> m.type() == CoopMessages.Type.BATTLE_BEGIN).findFirst().orElseThrow();
+        assertEquals("", CoopMessages.requiredPayloadString(begin, "npcFleetIds"));
+        host.bridge.handle(begin);
+        host.bridge.tickCampaign(null, true, 1_000L);
+        assertTrue(host.pause.eitherInCombat());
+
+        guest.bridge.onPlayerEngagement("DISENGAGED");
+        guest.bridge.tickCampaign(world.sector, true, 2_000L);
+        CoopMessages.Message end = guest.service.sent.stream()
+                .filter(m -> m.type() == CoopMessages.Type.BATTLE_END).findFirst().orElseThrow();
+        host.bridge.handle(end);
+        host.bridge.tickCampaign(null, true, 2_000L);
+
+        assertFalse(host.pause.eitherInCombat());
+        assertEquals(1, results.size(), "the native local battle still completes the result lifecycle");
+        assertEquals(List.of(), results.get(0).destroyedFleetIds());
+        assertEquals(List.of(), results.get(0).survivingFleets());
+        assertFalse(memoryOf(dweller).contains(CoopMirrorTags.NPC_MIRROR_TAG));
+    }
+
     // ---- helpers -----------------------------------------------------------------------------------
 
     private static CoopMessages.Message engageGuest(String coopFleetId, String fleetName) {
@@ -1058,7 +1124,15 @@ class CoopBattleBridgeTest {
                     case "getMemoryWithoutUpdate" -> mem;
                     case "getFleetData" -> roster == null ? throwUnreadable() : fleetData(roster);
                     case "getName" -> name;
-                    case "getFaction", "getCommander" -> null;
+                    case "getFaction" -> memory.containsKey(CoopLightBridge.ENCOUNTER_FLEET_KEY)
+                            ? Proxy.newProxyInstance(FactionAPI.class.getClassLoader(),
+                            new Class<?>[]{FactionAPI.class}, (f, fm, fargs) -> switch (fm.getName()) {
+                                case "getId" -> Factions.DWELLER;
+                                case "getCustomBoolean" -> Boolean.FALSE;
+                                default -> null;
+                            })
+                            : null;
+                    case "getCommander" -> null;
                     case "isHostileTo" -> true;
                     case "hashCode" -> System.identityHashCode(proxy);
                     case "equals" -> proxy == args[0];
@@ -1092,6 +1166,11 @@ class CoopBattleBridgeTest {
     // ---- engine proxies ---------------------------------------------------------------------------
 
     private static CombatEngineAPI combatEngine(List<Object> ships, boolean simulation) {
+        return combatEngine(ships, simulation, null);
+    }
+
+    private static CombatEngineAPI combatEngine(List<Object> ships, boolean simulation,
+                                                BattleCreationContext context) {
         return (CombatEngineAPI) Proxy.newProxyInstance(
                 CombatEngineAPI.class.getClassLoader(),
                 new Class<?>[]{CombatEngineAPI.class},
@@ -1099,7 +1178,7 @@ class CoopBattleBridgeTest {
                     case "isInCampaign" -> !simulation;
                     case "isInCampaignSim", "isSimulation" -> simulation;
                     case "getShips" -> ships;
-                    case "getContext" -> null;
+                    case "getContext" -> context;
                     case "getTotalElapsedTime" -> 12.5f;
                     case "hashCode" -> System.identityHashCode(proxy);
                     case "equals" -> proxy == args[0];

@@ -43,10 +43,34 @@ class CoopModPluginTest {
         CoopStallNotice.setActive(null);
         CoopFullFidelitySystemDriver.endSave();
         CoopPresenceRegistry.clear();
+        coop.ambient.CoopLightBridge.clear();
+        coop.storm.CoopStormBridge.clear();
+        coop.storm.CoopStormBridge.configureGuest(false);
         Global.setSector(null);
         System.clearProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY);
         System.clearProperty(CoopNetStartupConfig.CONNECT_HOST_PROPERTY);
         System.clearProperty(CoopNetStartupConfig.CONNECT_PORT_PROPERTY);
+    }
+
+    @Test
+    void stormLaunchRoleExistsBeforeCampaignLoadAndSurvivesHandlerClear() {
+        var baseSettings = ApiProxies.whiteSettings();
+        Global.setSettings((com.fs.starfarer.api.SettingsAPI) Proxy.newProxyInstance(
+                com.fs.starfarer.api.SettingsAPI.class.getClassLoader(),
+                new Class<?>[]{com.fs.starfarer.api.SettingsAPI.class}, (proxy, method, args) ->
+                        method.getName().equals("getVersionString") ? CoopPresenceRegistry.PINNED_VERSION
+                                : method.invoke(baseSettings, args)));
+        System.setProperty(CoopNetStartupConfig.CONNECT_HOST_PROPERTY, "127.0.0.1");
+        System.setProperty(CoopNetStartupConfig.CONNECT_PORT_PROPERTY, "7777");
+        CoopModPlugin.publishStormRole();
+        assertTrue(coop.storm.CoopStormBridge.isGuest());
+        CoopModPlugin.clearPreviousGameStatics();
+        assertTrue(coop.storm.CoopStormBridge.isGuest(), "native readResolve cannot lose its launch role");
+        System.clearProperty(CoopNetStartupConfig.CONNECT_HOST_PROPERTY);
+        System.clearProperty(CoopNetStartupConfig.CONNECT_PORT_PROPERTY);
+        System.setProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY, "7777");
+        CoopModPlugin.publishStormRole();
+        assertFalse(coop.storm.CoopStormBridge.isGuest(), "role comes from this launch, never saved Guest memory");
     }
 
     // ---- config-plugin-1: the save that failed -------------------------------------------------
@@ -127,6 +151,59 @@ class CoopModPluginTest {
         CoopModPlugin.beginGameSession();
 
         assertFalse(CoopFullFidelitySystemDriver.isSaveInProgress());
+    }
+
+    @Test
+    void lightRoleIsPublishedBeforeNativeFramesAndPreviousCampaignCallbacksAreDiscarded() {
+        var previousSettings = Global.getSettings();
+        try {
+            Global.setSettings((com.fs.starfarer.api.SettingsAPI) Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{com.fs.starfarer.api.SettingsAPI.class},
+                    (p, m, a) -> switch (m.getName()) {
+                        case "getVersionString" -> coop.presence.CoopPresenceRegistry.PINNED_VERSION;
+                        case "getColor" -> java.awt.Color.WHITE;
+                        default -> coop.testing.ProxyDefaults.defaultValue(m.getReturnType());
+                    }));
+            Map<String, Object> memory = new HashMap<>();
+            Global.setSector(ApiProxies.sectorWithMemory(ApiProxies.memory(memory)));
+            var location = (com.fs.starfarer.api.campaign.LocationAPI) Proxy.newProxyInstance(
+                    getClass().getClassLoader(), new Class<?>[]{com.fs.starfarer.api.campaign.LocationAPI.class},
+                    (p, m, a) -> m.getName().equals("isHyperspace") ? true
+                            : coop.testing.ProxyDefaults.defaultValue(m.getReturnType()));
+            var plugin = new com.fs.starfarer.api.impl.campaign.AbyssalLightEntityPlugin();
+            var lightMemory = ApiProxies.memory(new HashMap<>(Map.of(coop.ambient.CoopLightBridge.LIGHT_ID_KEY,
+                    "light:00000000-0000-0000-0000-000000000001")));
+            SectorEntityToken light = (SectorEntityToken) Proxy.newProxyInstance(getClass().getClassLoader(),
+                    new Class<?>[]{com.fs.starfarer.api.campaign.CustomCampaignEntityAPI.class},
+                    (p, m, a) -> switch (m.getName()) {
+                        case "getCustomPlugin" -> plugin;
+                        case "getContainingLocation" -> location;
+                        case "getMemoryWithoutUpdate" -> lightMemory;
+                        default -> coop.testing.ProxyDefaults.defaultValue(m.getReturnType());
+                    });
+            AtomicInteger oldEffects = new AtomicInteger();
+            coop.ambient.CoopLightBridge.install(false, new coop.ambient.CoopLightBridge.Handler() {
+                public void requestPulse(SectorEntityToken entity, boolean burst) { oldEffects.incrementAndGet(); }
+                public void requestDwellerConsumption(SectorEntityToken entity) { oldEffects.incrementAndGet(); }
+                public boolean allowDwellerDialog(SectorEntityToken entity) { oldEffects.incrementAndGet(); return true; }
+            });
+            System.setProperty(CoopNetStartupConfig.CONNECT_HOST_PROPERTY, "127.0.0.1");
+            System.setProperty(CoopNetStartupConfig.CONNECT_PORT_PROPERTY, "7777");
+            CoopModPlugin.beginGameSession();
+            assertTrue(coop.ambient.CoopLightBridge.holdsGuestLifetime(light));
+            assertFalse(coop.ambient.CoopLightBridge.allowDwellerDialog(light, null));
+            assertEquals(0, oldEffects.get());
+
+            System.clearProperty(CoopNetStartupConfig.CONNECT_HOST_PROPERTY);
+            System.clearProperty(CoopNetStartupConfig.CONNECT_PORT_PROPERTY);
+            System.setProperty(CoopNetStartupConfig.HOST_PORT_PROPERTY, "7777");
+            CoopModPlugin.beginGameSession();
+            assertFalse(coop.ambient.CoopLightBridge.holdsGuestLifetime(light));
+            assertTrue(coop.ambient.CoopLightBridge.allowDwellerDialog(light, null));
+            assertEquals(0, oldEffects.get());
+        } finally {
+            Global.setSettings(previousSettings);
+        }
     }
 
     // ---- save-seed-handshake-1 / forks-1: the forked Misc.random -------------------------------
@@ -237,6 +314,8 @@ class CoopModPluginTest {
         assertEquals(CoopSessionStats.class, x.aliases().get("coopStats"));
         assertEquals(CoopSessionStats.PlayerStats.class, x.aliases().get("coopStatsPlayer"));
         assertEquals(CoopSessionStats.ShipLoss.class, x.aliases().get("coopStatsLoss"));
+        assertEquals(coop.campaign.CoopAbyssalDespawner.class,
+                x.aliases().get("coopAbyssalDespawner"));
     }
 
     /** Records the alias calls; {@code XStream.alias} is the only method the plugin uses. */

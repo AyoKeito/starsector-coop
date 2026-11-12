@@ -5,6 +5,7 @@ import com.fs.starfarer.api.campaign.SectorEntityToken;
 import com.fs.starfarer.api.campaign.StarSystemAPI;
 import com.fs.starfarer.api.campaign.econ.EconomyAPI;
 import com.fs.starfarer.api.campaign.econ.MarketAPI;
+import com.fs.starfarer.api.impl.campaign.ids.Tags;
 import coop.handshake.CoopChecksum;
 import org.lwjgl.util.vector.Vector2f;
 
@@ -112,13 +113,13 @@ public final class CoopSectorFingerprint {
     }
 
     /**
-     * All star systems belong in the fingerprint. Deep-space special content (gate hauler,
-     * derelict rocks, abyssal objects) is made deterministic via coop-forks.jar RNG forks rather
-     * than excluded here, so it is fingerprinted and must match. Only dynamic host-authoritative
-     * base markets are dropped - see {@link #includeMarket(MarketAPI)}.
+     * Permanent systems, including the gate hauler and nameless rock, must match. Temporary
+     * abyssal systems are runtime encounter outcomes, so a host save can hold one the guest has
+     * not received yet. Exclude those systems and their markets from the seed-lock fingerprint.
+     * Hidden base markets are also excluded - see {@link #includeMarket(MarketAPI)}.
      */
     static boolean includeSystem(StarSystemAPI system) {
-        return system != null;
+        return system != null && !system.hasTag(Tags.TEMPORARY_LOCATION);
     }
 
     /**
@@ -144,7 +145,7 @@ public final class CoopSectorFingerprint {
                 continue;
             }
             StarSystemAPI system = market.getStarSystem();
-            if (system == null) {
+            if (!includeSystem(system)) {
                 continue;
             }
             marketsBySystem

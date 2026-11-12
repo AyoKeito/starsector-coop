@@ -6,6 +6,8 @@ import com.fs.starfarer.api.campaign.CustomCampaignEntityAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
+import com.fs.starfarer.api.campaign.StarSystemAPI;
+import coop.fleet.CoopEntityIds;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.impl.campaign.CargoPodsEntityPlugin;
 import coop.net.CoopConnectionRole;
@@ -34,6 +36,24 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * client's own counter, so the same id names different objects on the two sides.
  */
 class CoopWorldEntityReplicationTest {
+
+    @Test
+    void encounterConsumeResolvesCompositeKeyInsteadOfTheHostsNativeId() {
+        FakeLocation location = new FakeLocation();
+        location.encounterId = "instance-a";
+        FakeEntity wreck = new FakeEntity("guest-native-731").salvageable();
+        String key = "coopenc_instance-a_system4";
+        wreck.memory.put(CoopEntityIds.ENCOUNTER_ENTITY_ID_KEY, key);
+        wreck.memory.put("$coopEncId", "instance-a");
+        location.add(wreck);
+        Global.setSector(sector(location));
+
+        guestReplicator().handle(CoopMessages.worldDelta("session-a", 1, 10,
+                key, "CONSUME", true, "", "host-player"));
+
+        assertEquals(List.of(wreck), location.removed);
+        assertEquals("guest-native-731", wreck.id);
+    }
 
     @AfterEach
     void clearSector() {
@@ -225,6 +245,7 @@ class CoopWorldEntityReplicationTest {
         private final List<FakeEntity> entities = new ArrayList<>();
         private final List<FakeEntity> removed = new ArrayList<>();
         private LocationAPI cached;
+        private String encounterId;
 
         private FakeEntity add(FakeEntity entity) {
             entities.add(entity);
@@ -263,9 +284,10 @@ class CoopWorldEntityReplicationTest {
                 return cached;
             }
             cached = (LocationAPI) Proxy.newProxyInstance(
-                    LocationAPI.class.getClassLoader(), new Class<?>[]{LocationAPI.class},
+                    LocationAPI.class.getClassLoader(), new Class<?>[]{encounterId == null ? LocationAPI.class : StarSystemAPI.class},
                     (proxy, method, args) -> switch (method.getName()) {
                         case "getId" -> "loc-1";
+                        case "getOptionalUniqueId" -> encounterId;
                         case "getAllEntities" -> all();
                         case "removeEntity" -> {
                             FakeEntity entity = byToken(args[0]);

@@ -28,8 +28,8 @@ Everything below is the same thing at length, plus what to do when a step does n
 
 | Thing | Requirement |
 |---|---|
-| Starsector version | `0.98a-RC8` on both. A different RC is refused at connect. |
-| The co-op mod | The same download, unzipped on both. Two different builds are refused even when the version number matches. |
+| Starsector version | `0.98a-RC8` on both. Other versions are refused for co-op. |
+| The co-op mod | The same packaged download, unzipped on both. Different build identities are refused even when the version number matches. |
 | Mod folder name | Exactly `coop`, so the path reads `<Starsector>\mods\coop` on both. |
 | Every other mod | Same list, same versions, on both. |
 | Ironman | Off on both. A session where either side is in Ironman mode is refused. |
@@ -38,12 +38,20 @@ Section 8 explains what the refusal message looks like and how the check works.
 
 ## 2. Unpack the mod
 
+Download the attached `coop-<version>.zip` from the chosen [release page](https://github.com/AyoKeito/starsector-coop/releases),
+not GitHub's **Source code** archives. Both players need the same packaged ZIP, including its launcher,
+game jars and data. For a preview marked **Pre-release**, open that release directly and install it
+manually; the launcher's update check follows stable releases and does not offer previews.
+
 Unzip so that `mod_info.json` sits directly in `<Starsector>\mods\coop`:
 
 ```text
 K:\Starsector\mods\coop\mod_info.json
 K:\Starsector\mods\coop\jars\coop.jar
 K:\Starsector\mods\coop\jars\coop-forks.jar
+K:\Starsector\mods\coop\jars\coop-launcher.jar
+K:\Starsector\mods\coop\jars\flatlaf.jar
+K:\Starsector\mods\coop\Coop Launcher.cmd
 K:\Starsector\mods\coop\data\
 ```
 
@@ -64,22 +72,14 @@ A Starsector update overwrites `vmparams` and the row goes red again. Press **Fi
 nothing else to redo.
 
 Why the file has to be touched at all: `jars/coop.jar` loads the way every mod's jar loads, from
-`mod_info.json`. `jars/coop-forks.jar` cannot. It holds ten engine classes copied from Starsector and
-modified (`Misc`, `RouteManager`, `SourceBasedFleetManager` and seven more), and the JVM only prefers
+`mod_info.json`. `jars/coop-forks.jar` cannot. It holds modified engine classes, including native
+NPC managers and the ambient-world hooks, and the JVM only prefers
 a copy over the original if the copy comes earlier on the system classpath. Starsector's mod loader is
 a child classloader, which is too late. So the jar has to be named in `vmparams`, the file holding
 the JVM command line the game starts with.
 
-**If you skip it, the game still starts.** The forked classes fall back to stock behaviour and the
-log carries one warning:
-
-```text
-Coop guest presence unavailable: coop-forks.jar is not on the JVM classpath, so the spawner forks
-cannot be reached. NPC fleets will only spawn near the host.
-```
-
-That means patrols, traders and pirates cluster around the host and largely ignore the guest. The
-session works; the world is lopsided.
+This release requires those hooks. Correct a missing or misplaced classpath entry before launching;
+stock engine classes do not provide the co-op NPC and ambient-world behavior.
 
 ### When Fix cannot do it
 
@@ -186,8 +186,8 @@ not carry it.
 
 ### The line that says which save to load
 
-The launcher cannot load a save for you, and it never touches your saves folder. What it does is
-name the right one, under the card, in a single line:
+The launcher cannot load or edit a campaign save for you. It reads the co-op save index and
+names the right one, under the card, in a single line:
 
 ```text
 Load the save "Kaz Alba", level 12, saved 2026-05-28 18:16 (folder save_Kaz_1402953574686505955).
@@ -300,8 +300,9 @@ display. `REPORTING.md` explains the report contents.
 3. Guest: press **Join a game**, **Paste invite**, then **Check connection**. The status area shows
    the result; **Details** explains any problem. The footer explains anything blocking launch.
 4. Both press **Launch Starsector**, then **Play** in the vanilla launcher window.
-5. Both start New Game. The guest's Continue option names the host it will connect to, and the seed
-   is already filled in from the invite.
+5. Follow the save advice under each launcher's session card: start New Game for a fresh campaign,
+   or load the named co-op save to continue. For a new game, the guest's Continue option names the
+   host and the seed is already filled in from the invite.
 6. Both games load paused into the lobby, with the guest's join steps listed as they pass. The host
    presses Start; a three second countdown runs; the clock starts.
 7. The status line in the corner reads `HOST · waiting for guest`, then `session active` on both.
@@ -310,14 +311,17 @@ If it does not get that far, `CONNECT.md` is the next stop, and `REPORTING.md` s
 
 ## 7. Updating and uninstalling
 
-**Both of you install the same download.** The handshake compares the git commit baked into the jar,
-not just the version string, so two copies of "the same" version obtained separately are refused with
-`COOP-MODS`. A new release means both of you update before the next session.
+**Both of you install the same download.** The handshake compares build identities as well as version
+strings, so a matching version label alone does not make different builds compatible. A mismatch is
+refused with `COOP-MODS`. A new release means both of you update before the next session.
 
 The launcher checks at start and puts the answer in the install-check panel: `Update available:
 <version>`, `Up to date: <version>`, or `Update check: unavailable` with the reason. It is one request
 to GitHub's releases API and it never blocks the window. If you run LazyWizard's Version Checker, the
 mod ships a `coop.version` file, so it reports there too.
+
+The launcher checks GitHub's latest stable release. A preview marked **Pre-release** is outside that
+check; use its release page and install its packaged ZIP manually on both PCs.
 
 **A mod update can invalidate a co-op campaign in progress.** Save compatibility across releases is
 not promised. Unless a release note says a save carries over, finish a campaign on the build you
@@ -343,9 +347,10 @@ difference in any field ends the connection with the difference printed as the r
 compared, from `coop.handshake.CoopHandshakeManifest` and `CoopHandshakeDiff`:
 
 - The Starsector version string.
-- The co-op mod's own build version and git commit, so two separately built copies of "the same"
-  version are still caught. A build made from a modified checkout is stamped `<hash>-dirty` and is
-  caught the same way.
+- The co-op mod's own build version and git commit, so the same version label on different source
+  revisions does not pass. A build made from a modified checkout is stamped `<hash>-dirty`, which
+  differs from the clean build's identity.
+- The version and git commit reported by `coop-forks.jar`, separately from `coop.jar`.
 - For every enabled mod: id, display name, version, declared game version, folder path as
   `mods/<name>`, and the list of jars it declares.
 - For every enabled mod: a SHA-256 of its `mod_info.json` text, with line endings normalised so a

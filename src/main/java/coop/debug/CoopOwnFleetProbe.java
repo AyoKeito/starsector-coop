@@ -11,6 +11,7 @@ import com.fs.starfarer.api.combat.ShipVariantAPI;
 import com.fs.starfarer.api.fleet.FleetMemberAPI;
 import com.fs.starfarer.api.fleet.FleetMemberStatusAPI;
 import com.fs.starfarer.api.fleet.RepairTrackerAPI;
+import coop.fleet.CoopLocations;
 import coop.util.CoopDebug;
 import coop.util.CoopLog;
 
@@ -468,8 +469,8 @@ public final class CoopOwnFleetProbe {
             }
         }
         return new FleetState(nowMillis, timestamp, date, hour, day, supplies, fuel, crew,
-                hyper, paused, battleActive(), location == null || location.getId() == null
-                        ? "" : location.getId(), List.copyOf(members));
+                hyper, paused, battleActive(), CoopLocations.keyOf(location) == null
+                        ? "" : CoopLocations.keyOf(location), List.copyOf(members));
     }
 
     /**

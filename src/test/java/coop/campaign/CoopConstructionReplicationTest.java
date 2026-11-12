@@ -7,6 +7,7 @@ import com.fs.starfarer.api.campaign.FactionAPI;
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
 import com.fs.starfarer.api.campaign.SectorEntityToken;
+import com.fs.starfarer.api.campaign.StarSystemAPI;
 import com.fs.starfarer.api.campaign.rules.MemoryAPI;
 import com.fs.starfarer.api.impl.campaign.ids.Entities;
 import com.fs.starfarer.api.impl.campaign.ids.Tags;
@@ -63,6 +64,31 @@ class CoopConstructionReplicationTest {
     }
 
     // ---- Capture ---------------------------------------------------------------------------------
+
+    @Test
+    void aConstructionInNamelessRockCarriesItsUniqueSystemKey() {
+        Fixture f = new Fixture(CoopConnectionRole.GUEST);
+        f.location.id = "deep space";
+        f.location.uniqueId = "nameless_rock_location";
+        f.tick();
+        f.location.add(new FakeEntity("runtime-7").custom()
+                .tag(Tags.OBJECTIVE).tag(Tags.MAKESHIFT).type("nav_buoy_makeshift"));
+        f.tick();
+
+        assertEquals("nameless_rock_location", f.onlySpawn().locationId());
+    }
+
+    @Test
+    void cargoPodsInNamelessRockCarryItsUniqueSystemKey() {
+        Fixture f = new Fixture(CoopConnectionRole.GUEST);
+        f.location.id = "deep space";
+        f.location.uniqueId = "nameless_rock_location";
+        FakeEntity pods = f.location.add(new FakeEntity("pod-1").custom().type(Entities.CARGO_PODS));
+
+        f.replicator.onPlayerLeftCargoPods(pods.proxy());
+
+        assertEquals("nameless_rock_location", f.onlySpawn().locationId());
+    }
 
     @Test
     void aBuiltObjectiveIsReportedOnceWithItsSpecFactionOrbitAndConsumedStableLocation() {
@@ -144,6 +170,23 @@ class CoopConstructionReplicationTest {
     }
 
     // ---- Apply -----------------------------------------------------------------------------------
+
+    @Test
+    void aSpawnNamingNamelessRockCreatesTheEntityThereWhenGateHaulerSharesItsEngineId() {
+        Fixture f = new Fixture(CoopConnectionRole.HOST);
+        f.location.id = "deep space";
+        f.location.uniqueId = "nameless_rock_location";
+        FakeLocation gateHauler = new FakeLocation();
+        gateHauler.id = "deep space";
+        f.location.otherLocations.add(gateHauler.proxy());
+
+        f.replicator.handle(spawnMessage(new CoopWorldEntitySpawn(
+                "guest-player:runtime-7", "nav_buoy_makeshift", "nameless_rock_location",
+                40f, 50f, 0f, 0f, Map.of())));
+
+        assertEquals("nav_buoy_makeshift", f.location.onlyCreated().createdType);
+        assertTrue(gateHauler.created.isEmpty());
+    }
 
     @Test
     void applyingAConstructionCreatesItInOrbitAndRemovesTheStableLocation() {
@@ -433,6 +476,9 @@ class CoopConstructionReplicationTest {
 
     /** One star system holding the player fleet, plus the sector wrapper around it. */
     private static final class FakeLocation {
+        private String id = "loc-1";
+        private String uniqueId;
+        private final List<LocationAPI> otherLocations = new ArrayList<>();
         private final List<FakeEntity> entities = new ArrayList<>();
         private final List<FakeEntity> removed = new ArrayList<>();
         private final List<FakeEntity> created = new ArrayList<>();
@@ -495,10 +541,11 @@ class CoopConstructionReplicationTest {
             if (cached != null) {
                 return cached;
             }
-            cached = (LocationAPI) Proxy.newProxyInstance(
-                    LocationAPI.class.getClassLoader(), new Class<?>[]{LocationAPI.class},
+            cached = (StarSystemAPI) Proxy.newProxyInstance(
+                    StarSystemAPI.class.getClassLoader(), new Class<?>[]{StarSystemAPI.class},
                     (proxy, method, args) -> switch (method.getName()) {
-                        case "getId" -> "loc-1";
+                        case "getId" -> id;
+                        case "getOptionalUniqueId" -> uniqueId;
                         case "isHyperspace" -> false;
                         case "getAllEntities" -> all();
                         case "getEntitiesWithTag" -> tagged(String.valueOf(args[0]));
@@ -548,7 +595,11 @@ class CoopConstructionReplicationTest {
                     (proxy, method, args) -> switch (method.getName()) {
                         case "getPlayerFleet" -> player;
                         case "getHyperspace" -> locationProxy;
-                        case "getAllLocations" -> List.of(locationProxy);
+                        case "getAllLocations" -> {
+                            List<LocationAPI> locations = new ArrayList<>(otherLocations);
+                            locations.add(locationProxy);
+                            yield locations;
+                        }
                         case "getEntityById" -> byId(String.valueOf(args[0]));
                         case "toString" -> "Sector";
                         case "hashCode" -> System.identityHashCode(proxy);

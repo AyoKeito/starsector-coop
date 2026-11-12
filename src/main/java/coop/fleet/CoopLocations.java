@@ -2,6 +2,7 @@ package coop.fleet;
 
 import com.fs.starfarer.api.campaign.LocationAPI;
 import com.fs.starfarer.api.campaign.SectorAPI;
+import com.fs.starfarer.api.campaign.StarSystemAPI;
 
 import java.util.HashMap;
 import java.util.List;
@@ -26,8 +27,9 @@ import java.util.function.Consumer;
  *
  * <h2>The id&rarr;location cache</h2>
  * {@link #byId(SectorAPI, String)} answers the "which location is this id?" question the mirror
- * driving path asks at 10 Hz per mirrored fleet. Locations are created at world generation and are
- * stable for the life of a campaign, so the map is built once per sector by a single walk and reused.
+ * driving path asks at 10 Hz per mirrored fleet. The map is built once per sector and reused; a miss
+ * rebuilds it once to include newly created locations. Temporary-system creation/removal must call
+ * {@link #invalidate()} so cached hits and repeated misses cannot outlive a location change.
  * It is invalidated by identity — a different {@link SectorAPI} instance means a different game — and
  * explicitly by {@link #invalidate()} from {@code CoopModPlugin.onGameLoad}, which is belt and braces
  * for the case where a reload hands back the same engine object.
@@ -44,6 +46,24 @@ public final class CoopLocations {
     private static String lastMissedId = "";
 
     private CoopLocations() {
+    }
+
+    /**
+     * The cross-client location key. Vanilla deep-space systems share {@code getId()}; when a star
+     * system has an optional unique id, that is the identity the peer can resolve unambiguously.
+     * Ordinary systems and hyperspace keep their existing ids. A null location has no key.
+     */
+    public static String keyOf(LocationAPI location) {
+        if (location == null) {
+            return null;
+        }
+        if (location instanceof StarSystemAPI system) {
+            String uniqueId = system.getOptionalUniqueId();
+            if (uniqueId != null) {
+                return uniqueId;
+            }
+        }
+        return location.getId();
     }
 
     /**
@@ -129,7 +149,7 @@ public final class CoopLocations {
         lastMissedId = "";
         cachedSector = sector;
         forEach(sector, location -> {
-            String id = location.getId();
+            String id = keyOf(location);
             if (id != null && !id.isEmpty()) {
                 BY_ID.putIfAbsent(id, location);
             }

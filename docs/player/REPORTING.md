@@ -1,14 +1,14 @@
 # Reporting a problem
 
-Both players, every time. One side's report tells half the story: which side rejected, which side
-went quiet, which side saw the mismatch. The two are matched up by the session id, which is identical
-on both machines.
+For a co-op session problem, send reports from both players. One side's report tells half the story:
+which side rejected, which side went quiet, which side saw the mismatch. An established session has
+the same session id on both machines; a startup failure may have no session id yet.
 
 ## The bug report
 
 Press **Logs**, then **Save a bug report**, in the launcher, on both PCs, and attach both files. It writes
 `coop-report-host-<date>-<time>.zip` or `coop-report-guest-<date>-<time>.zip` to your Desktop and
-opens the folder it landed in.
+opens the folder it landed in. If there is no Desktop folder, it uses the Starsector install folder.
 
 Press it before you relaunch the game. Starsector rewrites `starsector.log` at every launch, so the
 run you want to report is gone the moment either of you starts the game again.
@@ -25,14 +25,16 @@ What is in the zip:
 | Your newest save | It carries the campaign id, the seed and the co-op state. Untick **Include my newest save** to leave it out, and it is skipped by itself if the game is still writing it. |
 | `report.txt` | Versions, which role you launched as, the last `[COOP-DOCTOR]` line, the last `Coop connection doctor:` block, and a list of what got packed. |
 
-The doctor block names the host's public address, so the zip carries it. If you would rather that did
-not sit in a public thread, send the file to whoever is helping instead of attaching it.
+The doctor block can name the host's public address, so the zip can carry it. Game logs and saves are
+copied without general redaction; the password scrubbing described above applies to the settings and
+launch line. Send the report privately if you do not want those files in a public thread.
 
 ## What to paste alongside it
 
-The `[COOP-DOCTOR]` line, from both sides, in the text of your post. It is the one line that says
-what happened, and `report.txt` has it near the top of the zip if you would rather copy it from
-there. It is written at WARN and starts with that literal, everything on one line by construction,
+If a refusal or session-ended dialog appeared, paste the `[COOP-DOCTOR]` line from both sides.
+`report.txt` has it near the top of the zip if one was logged. Visual mismatches during a running
+session may have no doctor line; use an F11 marker for those. The doctor line is written at WARN and
+starts with that literal, everything on one line by construction,
 newlines and quotes inside a value escaped, so it selects in a single drag:
 
 ```text
@@ -43,9 +45,10 @@ newlines and quotes inside a value escaped, so it selects in a single drag:
 dialog tells you to search for: `[COOP-DOCTOR] code=` followed by that code. A bare `[COOP-DOCTOR]`
 finds the line too.
 
-`sessionId` is the third field and holds the identical value in both players' logs. That is what
-lines two reports up without anyone having to say which is which. `role`, `local` and `remote` are
-written from each machine's own side, so they differ between the two.
+`sessionId` is the third field. It matches after the session is established; early refusals can have
+`<none>`, and different connection attempts can leave different last doctor lines. Include both
+reports anyway. `role`, `local` and `remote` are written from each machine's own side, so they differ
+between the two.
 
 What comes after `reason` depends on the code: seeds, fingerprints and campaign ids for `COOP-SEED`;
 `gameVersion`, `coopBuild`, `ironMode` and a semicolon-separated per-mod list for `COOP-MODS`;
@@ -115,9 +118,14 @@ brackets.
 ## What to say alongside it
 
 - What each of you was doing when it happened, and which of you saw it.
-- Whether the session id in the two reports matches. If it does not, the two of you were never in the
-  same session.
+- Whether the session ids match, and which connection attempt each report covers if they differ.
 - The full mod list on both PCs, if the mod refused to connect at all.
+
+For a slipstream, wreck, abyssal encounter, light or storm mismatch, press F11, pause and capture both
+views with the status line visible. Name the location and the object, which player interacted with
+it or used an ability, and whether this followed a load or reconnect. Say whether the difference
+persists after both clients have let time pass and then paused again. The ambient preview still has
+open visual checks, so matching diagnostics alone do not settle what appeared on screen.
 
 ## Turning on more detail
 

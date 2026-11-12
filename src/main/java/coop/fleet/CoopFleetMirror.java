@@ -600,7 +600,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
     // ---- Shared driving ----------------------------------------------------------------------
 
     private void placeInLocation(LocationAPI location, float x, float y) {
-        String targetId = location.getId();
+        String targetId = CoopLocations.keyOf(location);
         boolean locationChanged = !Objects.equals(targetId, lastLocationId);
         if (locationChanged) {
             LocationAPI current = mirrorFleet.getContainingLocation();
@@ -1905,7 +1905,7 @@ public class CoopFleetMirror implements CoopNpcMirror {
                 // Id-checked, not assumed: if the engine moved the mirror out from under us the
                 // containing location is not the one the record names, and the lookup below is what
                 // puts it back.
-                if (current != null && locationId.equals(current.getId())) {
+                if (current != null && locationId.equals(CoopLocations.keyOf(current))) {
                     return current;
                 }
             }

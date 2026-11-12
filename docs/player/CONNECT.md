@@ -1,8 +1,8 @@
 # Connecting to each other
 
 Only the host's machine has to be reachable. The guest opens the connection outward and sends the
-first UDP packet; the host answers on the path that packet came from. Nothing ever dials the guest.
-So when two people cannot connect, the problem is on the host's side, every time.
+first UDP packet; the host answers on the validated return path. Nothing ever dials the guest.
+Check the host's reachability first, then the guest's address, routing and firewall.
 
 ## Start here
 
@@ -14,9 +14,14 @@ startup and writes what happened to the log.
 | 3 | The game asks the router to open the port | Routers with UPnP or NAT-PMP switched on |
 | 2 | You open the port on the router yourself | Anyone with router access and a public IP |
 | 1 | IPv6, nothing to open on the router | Anyone whose ISP hands out IPv6 |
-| 0 | A VPN that puts both PCs on one private network | Everyone, carrier NAT included |
+| 0 | A VPN that puts both PCs on one private network | Carrier NAT and setups without router access |
 
-Tier 0 cannot fail. If you would rather not spend an evening on router pages, start there.
+A VPN can bypass carrier NAT without router changes, but both PCs still need a working VPN route
+and firewall access. If you prefer to avoid router setup, start there.
+
+Both PCs must run the same packaged build, including when testing a preview. Install a **Pre-release**
+manually from its release page; the launcher's stable update check does not offer it. See
+[INSTALL.md](INSTALL.md#2-unpack-the-mod).
 
 Before you load anything, find out whether the two of you can reach each other: the host presses
 **Check connection** in `Coop Launcher.cmd` and stays open, then the guest presses **Check connection** with the invite pasted in. Both are described in the next section.
@@ -74,8 +79,8 @@ Port field in **Edit connection** on the host, the Host address and Port fields 
 **Tailscale.** Both install from <https://tailscale.com/download> and sign in, either on one account
 or with the host inviting the guest to their tailnet. Open the Tailscale menu on the host and copy
 its `100.x.y.z` address. Host launches with `-Dcoop.hostPort=7777`, guest with
-`-Dcoop.connectHost=100.x.y.z -Dcoop.connectPort=7777`. If Tailscale reports "relayed" rather than
-"direct" it still works, at 20 to 60 ms more round trip.
+`-Dcoop.connectHost=100.x.y.z -Dcoop.connectPort=7777`. A relayed connection can add latency compared
+with a direct one; check the measured round trip rather than assuming a fixed penalty.
 
 **ZeroTier.** Install from <https://www.zerotier.com/download/>. The host creates a network at
 <https://my.zerotier.com> and both join it with `zerotier-cli join <network-id>`. The host then has to
@@ -84,8 +89,7 @@ shows each member's managed IP, usually `10.147.x.x`.
 
 **Radmin VPN.** Install from <https://www.radmin-vpn.com/>, host clicks Network then Create network,
 guest clicks Network then Join network with the same name and password. Both PCs appear in each
-other's window with a `26.x.x.x` address. No account needed, fastest to set up, and the only closed
-source option of the three.
+other's window with a `26.x.x.x` address.
 
 ## Tier 1: IPv6
 
@@ -134,9 +138,9 @@ On the router, find the page called Port Forwarding, Virtual Server or NAT, and 
 external port `7777`, internal port `7777`, internal address the one you just found, protocol
 **both TCP and UDP**. If the router only accepts one protocol per rule, add two rules.
 
-That "both" is the single most common mistake in this whole document. Fleet positions travel over
-UDP and everything else over TCP. Forward only TCP and the session connects, the clock syncs, and
-then the fleets stand still.
+Fleet positions normally travel over UDP, with TCP carrying reliable messages. If only TCP is
+forwarded, the session can use TCP fallback for movement, which may be less smooth. Forward both
+protocols to allow the UDP path.
 
 Get the address to give the guest from <https://ifconfig.me> on the host PC. Check the forward from
 outside by pasting that address and port into
@@ -257,10 +261,9 @@ Joining the co-op session.
 Waiting 0:12.
 ```
 
-Step 4 lands when the host's campaign clock arrives. That message is sent five times a second and is
-sent unconditionally, so it cannot fail to turn up on a link that works at all, which is why the
-ready gate hangs off it rather than off the world data. It is also the step that hands the guest over
-to the lobby.
+Step 4 lands when the host's campaign clock arrives on the live session. That message is sent at a
+five-per-second cadence. The join screen uses its arrival to confirm world synchronization and
+hand the guest over to the lobby.
 
 `Cancel` is live on this screen the whole time. It stops the retry loop and leaves your campaign
 loaded and paused; the host sees the ordinary disconnect it would have seen anyway. The feed line is
@@ -395,12 +398,14 @@ not taken out from under them. Turning it back on waits the same way.
 
 Nothing is lost the moment a connection dies.
 
-Detection takes about 15 seconds of silence, and not less. The network layer does not run during
-combat or while the game is writing a save, so a shorter timer would kill sessions that were never
-broken. A partner who is in a battle, who just announced a save, or whose process stalled is exempt
-for as long as that lasts.
+A silent broken link is declared dead after 15 seconds without inbound TCP traffic, subject to
+the exemptions below. A socket error can be detected sooner. The network layer does not run during
+combat or while the game is writing a save. A peer reported in combat is exempt while that state lasts. A coordinated save checkpoint
+provides a 60-second exemption. After a local frame stall of at least five seconds, that client waits
+another 15 seconds before treating accumulated silence as a dead link; an arbitrary remote stall
+can still trigger reconnect grace.
 
-Both players get a countdown, the world is held paused on both sides, and each of you can choose to
+With reconnect grace enabled, both players get a countdown, the world is held paused on both sides, and each of you can choose to
 end the session or wait another five minutes. The countdown holds at 30 minutes remaining at most:
 once it is there, pressing `Wait 5 more minutes` again does nothing and the countdown stays put. If
 the guest gets back inside the window, the session carries on: the whole world state is rebroadcast
@@ -441,16 +446,16 @@ not the save.
 |---|---|---|
 | Guest sits on "connecting" forever | The host is not reachable at all | Read the host's `tier reached` line. If it is 0, pick tier 0, 1 or 2. |
 | Guest connects, then drops within seconds | Wrong port, or a second router in the chain | Check the guest's `coop.connectPort` against the host's `coop.hostPort`. |
-| Session works, fleets do not move | UDP is blocked, TCP is not | Add the UDP forwarding rule and the UDP firewall rule. |
+| Session works but the log reports TCP fallback | UDP is blocked or its return path failed | Add/check the UDP forwarding and firewall rules; movement should continue over TCP. If fleets do not move at all, collect both logs. |
 | `CGNAT/double NAT` in the host log | The ISP, not your router | Tier 1 if you have IPv6, tier 0 otherwise. |
 | "no UPnP gateway answered" | UPnP is off, or the router does not speak it | Turn UPnP on, or use tier 2. |
 | "no UPnP gateway answered" on a router with VLANs | UPnP is pointed at the bridge, which holds no LAN address | Point it at the interface that holds the LAN address. |
 | `already mapped to <device>; set coop.hostPort to a free port` | Another device on the LAN owns that external port | Pick a different `coop.hostPort`, for example 7778. A stale mapping of your own is deleted and retried without you. |
 | `router only supports permanent leases; retrying TCP with lease 0` | The router refuses timed leases | Nothing to do; the mod retries with a permanent lease and deletes it on exit. |
-| Works on LAN, fails over the Internet | Almost always Windows Firewall on the host | Add both firewall rules from tier 1. |
+| Works on LAN, fails over the Internet | Public reachability differs from the LAN route | Check the public address, router forward, CGNAT and host firewall; add both firewall rules from tier 1. |
 | Fine but choppy | Latency, not reachability | Check round trip on the intel page. Above about 250 ms, try a VPN with a closer relay. |
-| One clock runs ahead, both games on one PC, both windows visible | Starsector caps its frame step, so a background window runs its clock slow | Keep both windows visible. The drift pulls back together within a minute. |
-| The reconnect countdown appears while your partner is minimised or alt-tabbed away | The minimised game has stopped advancing frames | Restore the window. The session reconnects and resumes on its own within a few seconds. |
+| One clock runs ahead, both games on one PC | A throttled window may advance its clock more slowly | Keep both windows visible and let time pass so the running clock correction can act. |
+| The reconnect countdown appears while your partner is minimised or alt-tabbed away | The other game may have stopped advancing frames | Restore the window and wait for reconnect. If it does not resume, collect both logs. |
 
 ---
 
@@ -599,8 +604,8 @@ Coop TCP closing connections from 203.0.113.9 with no reply for 28000 ms after 3
 
 Three wrong guesses buy a 30 second silent refusal, and each further failure doubles it up to ten
 minutes. Practical consequence for the guest: after fixing the password, wait out the cooldown. A
-corrected client looks broken while the host is still refusing the address, and relaunching during
-the cooldown extends it.
+corrected client looks broken while the host is still refusing the address. Restarting the guest
+does not clear the host's cooldown; attempts refused during it do not extend it.
 
 Other rejects read as plain sentences. `Lobby already has a guest` is retried automatically every 5
 seconds. So is `session in reconnect grace`, which a host on this build no longer sends at all, since
