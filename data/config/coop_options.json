@@ -160,5 +160,12 @@
 	# box to type a short note into. An LWJGL key name - F11, F9, HOME, INSERT and so on; an
 	# unknown name is warned about in starsector.log and falls back to F11.
 	# text | applies: next game load | Log markers
-	"coop.markKey":"F11"
+	"coop.markKey":"F11",
+
+	# true (default): let The Wingman Project (installed and enabled on both PCs) serve the
+	# battles of a coop session - the host opens Wingman from the campaign map and the guest
+	# connects Wingman to the host's PC and flies in the host's battles in real time.
+	# false: the classic solo own-fleet model (the partner watches from the paused campaign).
+	# true|false | applies: next connection attempt | Phase 34
+	"coop.wingmanBattles":true
 }

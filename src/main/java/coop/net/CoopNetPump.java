@@ -61,6 +61,7 @@ import coop.ui.CoopHudState;
 import coop.util.CoopDebug;
 import coop.util.CoopFrameProfiler;
 import coop.util.CoopLog;
+import coop.wingman.CoopWingmanIntegration;
 
 import java.util.ArrayDeque;
 import java.util.List;
@@ -741,6 +742,8 @@ public class CoopNetPump implements EveryFrameScript {
     private long nextNpcProbeAtMillis;
     private final CoopInteractionGate interactionGate = new CoopInteractionGate();
     private final CoopBattleBridge battleBridge;
+    /** Phase 34: Wingman battles integration; created lazily so a missing Wingman costs nothing. */
+    private CoopWingmanIntegration wingmanIntegration;
     private final CoopNpcThreatWatcher npcThreatWatcher;
     private final CoopBattleResultReconciler battleResultReconciler;
     /**
@@ -3510,6 +3513,9 @@ public class CoopNetPump implements EveryFrameScript {
         coop.debug.CoopOwnFleetProbe.INSTANCE.tickFromGlobal(clockMillis.getAsLong());
         // Same again for the datagram wiretap, which also emits its size summary from this poll.
         CoopWiretap.pollFrame();
+        // Phase 34: Wingman battles. First thing after instrumentation; the integration's own
+        // per-frame work is tiny when enabled and a single boolean read when not.
+        wingmanIntegration().tick();
         // Phase 29 M1: stream time advances by campaign dt, frozen while paused, before anything
         // this frame stamps an outbound datagram with it.
         streamClock.advance(amount, isSectorPausedForStream());
@@ -4727,6 +4733,9 @@ public class CoopNetPump implements EveryFrameScript {
                  // cross-table rule anyway; the join is here for the same reason a battle banner is,
                  // and the owner would rather learn a frame late why its campaign stopped.
                  ALLY_BATTLE_JOIN, ALLY_BATTLE_RESULT,
+                 // Phase 34: the guest's Wingman name is a fact about the guest, not the socket;
+                 // and it is reliable, so the cross-table rule requires it to survive anyway.
+                 WINGMAN_HELLO,
                  // 0.1.1, and the one member of isConnectionScopedControl that survives: a pre-drop
                  // ack is the partner saying it applied those seqs, which stays true after the drop.
                  // Honouring it is what stops the resume replaying messages that already landed.
@@ -5452,6 +5461,7 @@ public class CoopNetPump implements EveryFrameScript {
             case BATTLE_RESULT -> handleBattleResult(message);
             case ALLY_BATTLE_JOIN -> handleAllyBattleJoin(message);
             case ALLY_BATTLE_RESULT -> handleAllyBattleResult(message);
+            case WINGMAN_HELLO -> handleWingmanHello(message);
             case GUEST_SNAPSHOT -> handleGuestSnapshot(message);
             case SAVE_CHECKPOINT -> handleSaveCheckpoint(message);
             case SAVE_CHECKPOINT_RESULT -> handleSaveCheckpointResult(message);
@@ -9299,6 +9309,28 @@ public class CoopNetPump implements EveryFrameScript {
      * Owner side: the partner's engine has this player's fleet in a fight. One HUD line, because the
      * campaign is about to stop and the owner deserves to know whose battle stopped it.
      */
+    /** Phase 34: guest &rarr; host, the guest's Wingman panel name for flagship reservation. */
+    private void handleWingmanHello(CoopMessages.Message message) {
+        if (service.role() != CoopConnectionRole.HOST) {
+            return;
+        }
+        wingmanIntegration().onGuestWingmanName(CoopMessages.parseWingmanHelloName(message));
+    }
+
+    /** Phase 34: lazily created integration; the first frame a session runs pays the cost. */
+    private CoopWingmanIntegration wingmanIntegration() {
+        CoopWingmanIntegration integration = wingmanIntegration;
+        if (integration == null) {
+            integration = CoopWingmanIntegration.create(service, sessionState, clockMillis,
+                    m -> {
+                        service.send(m);
+                        log("outbound", m);
+                    });
+            wingmanIntegration = integration;
+        }
+        return integration;
+    }
+
     private void handleAllyBattleJoin(CoopMessages.Message message) {
         if (droppedBeforeTheSession(message.type())) {
             return;

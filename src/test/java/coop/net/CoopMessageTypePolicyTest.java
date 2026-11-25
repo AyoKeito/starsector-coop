@@ -73,7 +73,8 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.OPTIONS_APPLIED, CoopMessages.Type.CREDITS_GRANT,
             CoopMessages.Type.RELIABLE_ACK, CoopMessages.Type.SAVE_CHECKPOINT_RESULT,
             CoopMessages.Type.SESSION_LEAVE, CoopMessages.Type.MARK,
-            CoopMessages.Type.ALLY_BATTLE_JOIN, CoopMessages.Type.ALLY_BATTLE_RESULT);
+            CoopMessages.Type.ALLY_BATTLE_JOIN, CoopMessages.Type.ALLY_BATTLE_RESULT,
+            CoopMessages.Type.WINGMAN_HELLO);
 
     // ---- table: CoopNetService.coalesceKey(Message) ------------------------------------------
     // Whitelist of whole-state snapshots that may supersede a queued copy of themselves; every
@@ -144,7 +145,9 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.MARK,
             // Phase 33: the only report of what a battle on the other engine did to this player's
             // ships. Nothing re-sends it, and losing it leaves the owner flying wrecks.
-            CoopMessages.Type.ALLY_BATTLE_RESULT);
+            CoopMessages.Type.ALLY_BATTLE_RESULT,
+            // Phase 34: the guest's Wingman name; losing it only costs the flagship reservation.
+            CoopMessages.Type.WINGMAN_HELLO);
 
     // ---- table: CoopNetPump.allowedDuringReconnectGrace(Type) --------------------------------
     // The only vocabulary an unproven peer may speak while a reconnect grace window is open: the
@@ -209,7 +212,10 @@ class CoopMessageTypePolicyTest {
             CoopMessages.Type.MARK,
             // Phase 33: both halves describe a battle on the other engine that the drop edge does
             // not un-fight.
-            CoopMessages.Type.ALLY_BATTLE_JOIN, CoopMessages.Type.ALLY_BATTLE_RESULT);
+            CoopMessages.Type.ALLY_BATTLE_JOIN, CoopMessages.Type.ALLY_BATTLE_RESULT,
+            // Phase 34: a fact about the guest, not the socket, and reliable by the cross-table
+            // rule anyway.
+            CoopMessages.Type.WINGMAN_HELLO);
 
     // ---- table: CoopNetPump.isTerminalRejectType(Type) ---------------------------------------
     // The peer's verdicts on a join, dispatched a few lines early out of the pre-drop drain so

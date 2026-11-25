@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.3 (Wingman battles)
+
+Full battle synchronisation through The Wingman Project (0.9.4-beta or later, installed and
+enabled on both PCs). When `coop.wingmanBattles` is on (default), the coop host opens its
+Wingman session from the campaign map and every battle the host fights is served by Wingman:
+the guest connects Wingman to the host's PC once and then flies in the host's battles in real
+time, with real damage to their own ships, reconciled into the shared campaign by the existing
+battle-result path.
+
+- Host: opens the Wingman session at coop session start, pumps it on campaign frames, learns
+  the guest's Wingman name (new reliable `WINGMAN_HELLO` message) and reserves the guest's
+  mirror-fleet flagship for them, so the guest gets their own ship whenever their fleet
+  deploys (Fight Alongside toggle).
+- Guest: reports its Wingman name, posts a one-time hint with the host address and Wingman
+  port, and keeps the coop battle bridge in spectator mode while inside a Wingman join battle
+  (the shared pause and the host's `BATTLE_BEGIN/END` continue to drive the campaign clock).
+- Every Wingman call is reflection-only and fails closed to the classic solo own-fleet model;
+  with Wingman absent nothing changes at all.
+- New option `coop.wingmanBattles` (Coop Options page, default on).
+
 ## 0.2.2 (community port to 0.98.5a-RC9)
 
 This is a community port of the 0.2.1 preview to **Starsector 0.98.5a-RC9** (upstream 0.2.1 targets

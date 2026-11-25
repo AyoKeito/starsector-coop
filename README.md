@@ -12,12 +12,12 @@ Your ships, cargo, credits, officers, and skills stay yours.
 </p>
 
 > [!IMPORTANT]
-> **0.2.2 is a community port of the 0.2.1 preview to Starsector 0.98.5a-RC9** (the RC5 build the
-> upstream preview targets is no longer offered for download). Both players must run this same
-> 0.2.2 build on 0.98.5a-RC9 and back up their saves before upgrading.
-> One player pilots each battle on their own PC; the other
-> player waits on a paused campaign, and can send their fleet in as an AI ally. Two players piloting
-> in the same battle is not supported in this release.
+> **0.2.3 adds full battle synchronisation through The Wingman Project** (installed and enabled
+> on both PCs; see "Battles together" below). 0.2.2/0.2.3 are community ports of the upstream
+> preview to **Starsector 0.98.5a-RC9** (the RC5 build the upstream preview targets is no longer
+> offered for download). Both players must run this same build on 0.98.5a-RC9 and back up their
+> saves before upgrading. Without Wingman, one player pilots each battle on their own PC; the
+> other player waits on a paused campaign, and can send their fleet in as an AI ally.
 
 ## What you share
 
@@ -32,6 +32,25 @@ Your ships, cargo, credits, officers, and skills stay yours.
 
 The [limitations guide](docs/player/LIMITATIONS.md) explains the details, including storage fees,
 local trade effects, missions, and differences between the two screens.
+
+## Battles together (Wingman)
+
+With [The Wingman Project](https://github.com/NEOysod/TheWingmanProject) 0.9.4-beta or later
+installed and enabled on **both** PCs, battles are fully synchronised: when the host fights,
+the guest joins the same battle over Wingman and pilots a ship in real time.
+
+- The host opens the Wingman session automatically from the campaign map (port 24816, plus UDP
+  where it gets through). The guest connects Wingman **once**: title screen &rarr; CO-OP &rarr;
+  host address &rarr; port 24816. The guest's coop client posts the same hint as a campaign
+  message when a session starts.
+- The guest's fleet joins the host's battles through the usual **Fight Alongside** toggle; the
+  coop host reserves the guest's flagship with Wingman, so the guest gets their own ship when
+  it deploys. Without the toggle, the guest flies the host's ships instead (nothing of the
+  guest's is risked).
+- Damage is real: a ship the guest loses in the host's battle is lost for real, exactly as in
+  the AI-ally model, and the result is reconciled into the shared campaign by the same path.
+- Everything degrades gracefully: without Wingman, without the connection, or with
+  `coop.wingmanBattles` off, battles fall back to the solo own-fleet model below.
 
 ## Requirements
 

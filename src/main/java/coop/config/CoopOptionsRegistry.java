@@ -249,6 +249,8 @@ public final class CoopOptionsRegistry {
     public static final String RECONNECT_GRACE_SECONDS = "coop.reconnectGraceSeconds";
     public static final String ALLOW_GUEST_PAUSE = "coop.allowGuestPause";
     public static final String PAUSE_ON_GUEST_SCREENS = "coop.pauseOnGuestScreens";
+    /** Phase 34: let The Wingman Project serve battles inside a coop campaign session. */
+    public static final String WINGMAN_BATTLES = "coop.wingmanBattles";
     public static final String ALLOW_MID_SESSION_JOIN = "coop.allowMidSessionJoin";
     public static final String LOOT_SPLIT = "coop.lootSplit";
     public static final String INCOME_SPLIT = "coop.incomeSplit";
@@ -351,6 +353,12 @@ public final class CoopOptionsRegistry {
                 "next connection attempt", ApplyBoundary.NEXT_CONNECTION,
                 "Whether a guest may join a campaign already in progress. INERT until Phase 27"
                         + " builds."));
+        options.add(boolOption(WINGMAN_BATTLES, Tier.POLICY, "true", "Phase 34",
+                "next connection attempt", ApplyBoundary.NEXT_CONNECTION,
+                "Let The Wingman Project (when installed and enabled on both PCs) serve the battles"
+                        + " of a coop session: the host opens Wingman from the campaign map, the guest"
+                        + " connects Wingman to the host's PC and flies in the host's battles. off = the"
+                        + " classic solo own-fleet model (the partner watches from the paused campaign)."));
         options.add(enumOption(LOOT_SPLIT, Tier.POLICY, "equal", List.of("equal"), "Phase 22",
                 "next battle result", ApplyBoundary.NEXT_BATTLE_RESULT,
                 "How salvage from a jointly fought battle is divided. INERT until Phase 22 builds,"

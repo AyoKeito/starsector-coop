@@ -352,7 +352,13 @@ public final class CoopMessages {
          * it. The ledger makes the replay free — {@code CoopAllyLossApplier} is idempotent on its own,
          * and the pump's ledger means a re-send does not even reach it.
          */
-        ALLY_BATTLE_RESULT
+        ALLY_BATTLE_RESULT,
+        /**
+         * Phase 34: guest &rarr; host, "this is my Wingman panel name". The host uses it to
+         * reserve the guest's flagship with Wingman so the guest gets their own ship when it
+         * deploys. Reliable one-shot per session; nothing re-sends it on its own.
+         */
+        WINGMAN_HELLO
     }
 
     /**
@@ -411,7 +417,7 @@ public final class CoopMessages {
                  MARK,
                  // Phase 33: the only report of what a battle on the other engine did to this
                  // player's ships. Nothing re-sends it and nothing else carries the same facts.
-                 ALLY_BATTLE_RESULT -> true;
+                 ALLY_BATTLE_RESULT, WINGMAN_HELLO -> true;
             case LOBBY_HELLO, LOBBY_CHALLENGE, LOBBY_ACCEPT, LOBBY_REJECT, LOBBY_STATUS,
                  HANDSHAKE_MANIFEST, HANDSHAKE_RESULT,
                  SEED_LOCK_REQUEST, SEED_LOCK_ACK, SEED_LOCK_REJECT,
@@ -2286,6 +2292,17 @@ public final class CoopMessages {
         return new Message(Type.STALL_NOTICE, trimToNullable(sessionId), seq, sentAtMillis,
                 "{\"reason\":\"" + escapeJson(reason == null ? "" : reason) + "\","
                         + "\"expectedMillis\":" + Math.max(0L, expectedMillis) + "}");
+    }
+
+    /** Phase 34: guest &rarr; host, the guest's Wingman panel name. */
+    public static Message wingmanHello(String sessionId, long seq, long sentAtMillis, String name) {
+        return new Message(Type.WINGMAN_HELLO, trimToNullable(sessionId), seq, sentAtMillis,
+                "{\"name\":\"" + escapeJson(name == null ? "" : name) + "\"}");
+    }
+
+    /** Phase 34: the name a {@code WINGMAN_HELLO} carries, or {@code ""}. */
+    public static String parseWingmanHelloName(Message message) {
+        return optionalPayloadString(message, "name", "");
     }
 
     /** Why the peer is about to go quiet, or "" when it did not say. */

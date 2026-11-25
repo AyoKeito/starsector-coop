@@ -6,8 +6,11 @@ solo play and the preview features that still need in-game checking.
 
 ## The short list
 
-- **One of you pilots every battle.** Your fleet can join your partner's fight as an AI ally, with
-  real losses, but two players piloting in one battle is not in this release.
+- **Battles are shared only with Wingman.** Without The Wingman Project, one of you pilots every
+  battle; your fleet can join your partner's fight as an AI ally, with real losses, but two
+  players piloting in one battle is not in this release. With Wingman 0.9.4-beta+ installed and
+  enabled on both PCs and `coop.wingmanBattles` on, the guest joins the host's battles over
+  Wingman and pilots a ship in real time — see README "Battles together".
 - **Ambient world synchronization is a preview.** Host slipstreams, floating hyperspace wrecks,
   supported abyssal encounters, lights and storm phases now reach the guest. Matching visuals and
   the full range of native storm effects still need in-game checking.
@@ -30,6 +33,14 @@ solo play and the preview features that still need in-game checking.
 
 **Whoever gets engaged pilots the fight** on their own PC, as normal. Your partner's campaign is
 paused for the duration.
+
+**With Wingman battles on** (Wingman installed and enabled on both PCs, `coop.wingmanBattles` on),
+the host's battles are served by Wingman instead: the guest connects Wingman to the host's PC
+once, joins the battle, and pilots a ship in real time. The coop layer keeps doing everything
+else — shared pause, `BATTLE_BEGIN/END`, and the result reconciliation that writes real damage
+and losses back to the guest's fleet. The guest's flagship is reserved for them when their fleet
+deploys through Fight Alongside; without the toggle the guest flies the host's ships and risks
+nothing of their own.
 
 **Your fleet can join as an AI ally.** The toggle ability on your ability bar decides it: off, your
 fleet is a mirror on your partner's screen and nothing pulls it in; on, your partner's encounters

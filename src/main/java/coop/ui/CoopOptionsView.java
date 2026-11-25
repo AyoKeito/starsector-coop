@@ -130,6 +130,7 @@ public record CoopOptionsView(List<Section> sections) {
         LABELS.put(CoopOptionsRegistry.ALLOW_GUEST_PAUSE, "Guest may pause the world");
         LABELS.put(CoopOptionsRegistry.PAUSE_ON_GUEST_SCREENS, "Pause while a guest reads a screen");
         LABELS.put(CoopOptionsRegistry.ALLOW_MID_SESSION_JOIN, "Allow joining a session in progress");
+        LABELS.put(CoopOptionsRegistry.WINGMAN_BATTLES, "Wingman serves the battles");
         LABELS.put(CoopOptionsRegistry.LOOT_SPLIT, "Battle loot split");
         LABELS.put(CoopOptionsRegistry.INCOME_SPLIT, "Colony income split");
         LABELS.put(CoopOptionsRegistry.GUEST_COLONIZATION_CONSENT, "Guest asks before colonizing");

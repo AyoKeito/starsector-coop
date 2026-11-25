@@ -22,6 +22,7 @@ import coop.net.CoopNetService;
 import coop.session.CoopSessionState;
 import coop.time.CoopSharedPauseCoordinator;
 import coop.util.CoopLog;
+import coop.wingman.CoopWingmanIntegration;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -200,6 +201,12 @@ public final class CoopBattleBridge {
 
     // ---- spectator side ----
     private boolean remoteBattleActive;
+    /**
+     * Phase 34: this guest client is inside a Wingman join battle (the host's battle, served by
+     * The Wingman Project). Set on the first such combat frame, cleared on the first campaign
+     * frame. While set, combat frames never start a local battle and never stream status.
+     */
+    private boolean guestInWingmanJoinBattle;
     private String remoteBattleId = "";
     /** Host {@code coopFleetId}s the partner reported fighting, from its {@code BATTLE_BEGIN}. */
     private final List<String> remoteBattleNpcFleetIds = new ArrayList<>();
@@ -357,6 +364,24 @@ public final class CoopBattleBridge {
             if (!isCampaignBattle(engine)) {
                 return;
             }
+            // Phase 34: a campaign battle on the guest while the host's battle is known and this
+            // client is joined to a Wingman host is the Wingman join battle, not the guest's own
+            // engagement. Latch it: the guest stays a spectator (remote battle semantics) for the
+            // whole battle, including the end screen after BATTLE_END has already cleared
+            // remoteBattleActive.
+            if (!localBattleActive) {
+                boolean wingmanJoin = CoopWingmanIntegration.classifyGuestWingmanJoin(false,
+                        remoteBattleActive,
+                        service.role() == CoopConnectionRole.GUEST,
+                        guestInWingmanCombat());
+                if (wingmanJoin) {
+                    guestInWingmanJoinBattle = true;
+                }
+            }
+            if (guestInWingmanJoinBattle) {
+                sawCombatFrame = true;
+                return;
+            }
             if (!localBattleActive) {
                 // The kind cannot be read off the engine — a handoff battle and a right-click battle
                 // enter combat through the identical dialog seam — so it is carried in from the
@@ -411,6 +436,9 @@ public final class CoopBattleBridge {
     /** Called once per pump frame (including while paused). Never throws. */
     public void tickCampaign(SectorAPI sector, boolean sessionActive, long nowMillis) {
         try {
+            // Phase 34: a campaign frame means this client's combat is over locally; drop the
+            // Wingman join-battle latch (it is only set from combat frames).
+            guestInWingmanJoinBattle = false;
             if (!sessionActive) {
                 // Not a pure edge: a battle can be opened from the combat frame without this method
                 // ever having seen an active session, and that battle still has to be released.
@@ -500,6 +528,21 @@ public final class CoopBattleBridge {
      */
     public boolean isRemoteBattleActive() {
         return remoteBattleActive;
+    }
+
+    /**
+     * Phase 34: whether this client's combat frames should be treated as a Wingman join battle.
+     * True when this is the guest, a coop session is live, and the guest is connected to a
+     * Wingman host. Never throws: a Wingman API failure answers false and the classic solo
+     * model applies.
+     */
+    private boolean guestInWingmanCombat() {
+        try {
+            CoopWingmanIntegration integration = CoopWingmanIntegration.active();
+            return integration != null && integration.guestCombatIsWingmanJoin();
+        } catch (RuntimeException | LinkageError ex) {
+            return false;
+        }
     }
 
     // ---- inbound -------------------------------------------------------------------------------
@@ -1303,6 +1346,7 @@ public final class CoopBattleBridge {
         }
         localBattleActive = false;
         sawCombatFrame = false;
+        guestInWingmanJoinBattle = false;
         lastSeenShips.clear();
         killFeed.clear();
         localBattleNpcFleetIds.clear();
