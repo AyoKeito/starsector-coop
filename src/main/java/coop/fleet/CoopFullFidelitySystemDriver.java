@@ -78,8 +78,8 @@ public final class CoopFullFidelitySystemDriver {
     private static final boolean ENABLED =
             Boolean.parseBoolean(System.getProperty(ENABLED_PROPERTY, "true"));
 
-    /** The unused second parameter of {@code BaseLocation.advance} on 0.98.5a-RC5. */
-    private static final String ADVANCE_PARAM_CLASS = "com.fs.starfarer.util.super.OoOO";
+    /** The unused second parameter of {@code BaseLocation.advance} on 0.98.5a-RC9. */
+    private static final String ADVANCE_PARAM_CLASS = "com.fs.starfarer.util.oOOO$new";
 
     private static boolean handlesResolved;
     private static boolean permanentlyDisabled;

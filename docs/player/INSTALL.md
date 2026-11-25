@@ -28,7 +28,7 @@ Everything below is the same thing at length, plus what to do when a step does n
 
 | Thing | Requirement |
 |---|---|
-| Starsector version | `0.98.5a-RC5` on both. Other versions are refused for co-op. |
+| Starsector version | `0.98.5a-RC9` on both. Other versions are refused for co-op. |
 | The co-op mod | The same packaged download, unzipped on both. Different build identities are refused even when the version number matches. |
 | Mod folder name | Exactly `coop`, so the path reads `<Starsector>\mods\coop` on both. |
 | Every other mod | Same list, same versions, on both. |
@@ -99,7 +99,7 @@ Find the text ` -classpath ` and insert this immediately after it, semicolon inc
 ..\mods\coop\jars\coop-forks.jar;
 ```
 
-The classpath on a stock 0.98.5a-RC5 Windows install starts like this:
+The classpath on a stock 0.98.5a-RC9 Windows install starts like this:
 
 ```text
  -classpath janino.jar;commons-compiler.jar;commons-compiler-jdk.jar;starfarer.api.jar;...

@@ -234,9 +234,9 @@ class CoopInstallCheckTest {
     void theLastLauncherLineWinsBecauseTheLogIsAppendedToAcrossRuns() {
         String twoRuns = LOG_HEAD + "\n"
                 + "0    [main] INFO  com.fs.starfarer.StarfarerLauncher  - Starting Starsector"
-                + " 0.98.5a-RC5 launcher\n";
+                + " 0.98.5a-RC9 launcher\n";
 
-        assertEquals("0.98.5a-RC5", CoopInstallCheck.gameVersionInLogText(twoRuns));
+        assertEquals("0.98.5a-RC9", CoopInstallCheck.gameVersionInLogText(twoRuns));
     }
 
     @Test

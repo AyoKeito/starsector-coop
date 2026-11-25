@@ -61,7 +61,7 @@ import com.fs.starfarer.api.util.WeightedRandomPicker;
 
 public class SlipstreamTerrainPlugin2 extends BaseTerrain {
 	// COOP FORK: method rather than constant so callers verify the loaded native class.
-	public static String coopFadeHookVersion() { return "0.98.5a-RC5/canonical-fade-1"; }
+	public static String coopFadeHookVersion() { return "0.98.5a-RC9/canonical-fade-1"; }
 
 	// COOP FORK: the bridge alone calls this instead of raw-frame fade advancement.
 	// Fader order and spawn/despawn implementations remain native; the host's location mode

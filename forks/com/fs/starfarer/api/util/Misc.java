@@ -5328,6 +5328,15 @@ public class Misc {
 		return heavyIndustry;
 	}
 	
+	public static boolean hasFunctionalHeavyIndustry(MarketAPI market) {
+		for (Industry curr : market.getIndustries()) {
+			if (curr.isFunctional() && curr.getSpec().hasTag(Industries.TAG_HEAVYINDUSTRY)) {
+				return true;
+			}
+		}
+		return false;
+	}
+	
 	public static boolean hasOrbitalStation(MarketAPI market) {
 		for (Industry curr : market.getIndustries()) {
 			if (curr.getSpec().hasTag(Industries.TAG_STATION)) {

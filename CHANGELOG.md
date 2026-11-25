@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.2 (community port to 0.98.5a-RC9)
+
+This is a community port of the 0.2.1 preview to **Starsector 0.98.5a-RC9** (upstream 0.2.1 targets
+0.98.5a-RC5, which Fractal Softworks no longer offers for download). Back up both co-op saves and
+install the same `coop-0.2.2.zip` on both PCs. If the game update reset `vmparams`, open
+**Installation Details** in the co-op launcher and click **Fix** beside the classpath check.
+
+- Game version pin moved from `0.98.5a-RC5` to `0.98.5a-RC9` (mod_info.json, handshake and hook
+  version strings).
+- Fork porting verified against the RC9 engine jars: all 21 forked classes keep their field
+  layouts and method signatures; `Misc.hasFunctionalHeavyIndustry`, added by a 0.98.5a hotfix, is
+  added to the Misc fork so RC9 engine callers cannot hit a `NoSuchMethodError`.
+- The full-fidelity guest-system drive resolves the RC9 signature of `BaseLocation.advance`
+  (second parameter class moved to `com.fs.starfarer.util.oOOO$new`).
+- `StarfarerSettings` toggle handles and `CampaignState.fastForward` verified present in RC9 with
+  the same names; fast-forward toggle mode needs no change.
+- Version Checker feed points at the fork; mod version bumped to 0.2.2.
+
 ## 0.2.1 preview
 
 This preview targets **Starsector 0.98.5a-RC5**. Back up both co-op saves and install

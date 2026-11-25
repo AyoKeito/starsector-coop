@@ -1,6 +1,6 @@
 # Starsector Coop V1 (0.2.1 preview)
 
-Two people, two copies of Starsector 0.98.5a-RC5, one campaign. The sector is generated once from a
+Two people, two copies of Starsector 0.98.5a-RC9, one campaign. The sector is generated once from a
 shared seed and both of you fly around in it at the same time, on one calendar. The host's game is
 the authority: it runs the NPC fleets, the markets, the economy and the colonies, and the guest's
 game mirrors them. One of you pilots each battle; the other can send their fleet in as an AI ally.
@@ -11,7 +11,7 @@ Keep copies of both saves before updating.
 
 ## Requirements
 
-- Starsector `0.98.5a-RC5` on both PCs, in Normal campaign mode with Ironman off. Both players need
+- Starsector `0.98.5a-RC9` on both PCs, in Normal campaign mode with Ironman off. Both players need
   the same co-op build and the same versions of every other enabled mod.
 - The host's machine reachable from the guest, by one of: a VPN pseudo-LAN, IPv6, a port forward you
   add yourself, or UPnP/NAT-PMP. `docs/player/CONNECT.md` walks through all four and explains what

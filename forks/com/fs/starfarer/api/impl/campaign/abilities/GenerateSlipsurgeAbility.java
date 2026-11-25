@@ -118,7 +118,7 @@ public class GenerateSlipsurgeAbility extends DurationAbilityWithCost2 {
 		}
 
 		// COOP FORK: primitive cursor access for deserialized native scripts; no constructor mapping.
-		public static String coopFadeHookVersion() { return "0.98.5a-RC5/canonical-fade-1"; }
+		public static String coopFadeHookVersion() { return "0.98.5a-RC9/canonical-fade-1"; }
 		public SlipstreamTerrainPlugin2 coopFadeOwner() { return plugin; }
 		public CoopSlipstreamFadeBridge.SurgeWaveState coopCaptureFadeState() {
 			return new CoopSlipstreamFadeBridge.SurgeWaveState(true, done, index, elapsed, maxElapsed);

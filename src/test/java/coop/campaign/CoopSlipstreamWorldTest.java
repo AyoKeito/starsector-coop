@@ -38,7 +38,7 @@ class CoopSlipstreamWorldTest {
     void pinnedNativeHooks() {
         previousSettings = Global.getSettings();
         Global.setSettings(proxy(SettingsAPI.class, (self, method, args) -> switch (method.getName()) {
-            case "getVersionString" -> "Starsector 0.98.5a-RC5";
+            case "getVersionString" -> "Starsector 0.98.5a-RC9";
             default -> coop.testing.ProxyDefaults.defaultValue(method.getReturnType());
         }));
     }

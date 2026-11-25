@@ -8,7 +8,7 @@
     # (merged across mods, column "version file") and loads each path it names.
 
     # Where the online copy of this file lives. Must be the raw file, not a redirect page.
-    "masterVersionFile":"https://raw.githubusercontent.com/AyoKeito/starsector-coop/main/coop.version",
+    "masterVersionFile":"https://raw.githubusercontent.com/openmans/starsector-coop/main/coop.version",
 
     # Displayed in-game. Matches "name" in mod_info.json.
     "modName":"Starsector Coop V1",
@@ -22,7 +22,7 @@
     {
         "major":0,
         "minor":2,
-        "patch":1
+        "patch":2
     },
 
     # Optional, read by LunaLib's bundled version checker UI.
